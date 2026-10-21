@@ -5,6 +5,7 @@ from django.utils import timezone
 class Wildberries(Adapter):
     base_url = 'https://feedbacks-api.wildberries.ru'
     page_size = 1000
+    streams = [('review', 'feedbacks', 'false'), ('question', 'questions', 'false'), ('review', 'feedbacks', 'true'), ('question', 'questions', 'true')]
 
     def before_request(self, token):
         from .rate_limit import acquire
@@ -29,7 +30,7 @@ class Wildberries(Adapter):
         if 'until' not in cursor:
             cursor.update(until=int(timezone.now().timestamp()), since=max(0, cursor.get('watermark', 0) - 86400), stream=0, skip=0)
             self.checkpoint(dict(cursor))
-        streams = [('review', 'feedbacks', 'false'), ('question', 'questions', 'false'), ('review', 'feedbacks', 'true'), ('question', 'questions', 'true')]
+        streams = self.streams
         while cursor['stream'] < len(streams):
             kind, key, answered = streams[cursor['stream']]
             if cursor['skip'] >= 200000:
