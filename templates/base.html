@@ -1,0 +1,15 @@
+{% load static %}<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{% block title %}Voice · Клиентские коммуникации{% endblock %}</title><link rel="stylesheet" href="{% static 'app.css' %}"><script src="{% static 'app.js' %}" defer></script></head>
+<body><aside class="sidebar"><a class="logo" href="{% url 'inbox' %}"><span class="logo-mark">v</span>voice<span class="logo-dot">.</span></a><div class="workspace"><span class="avatar company-avatar">O</span><div><b>Клиентский опыт</b><small>Единое пространство</small></div></div><span class="nav-label">РАБОЧЕЕ ПРОСТРАНСТВО</span><nav>
+<a class="{% if request.resolver_match.url_name == 'inbox' or request.resolver_match.url_name == 'thread' %}active{% endif %}" href="{% url 'inbox' %}"><span>▤</span>Единый Inbox</a>
+<a class="{% if request.resolver_match.url_name == 'voc' %}active{% endif %}" href="{% url 'voc' %}"><span>◴</span>Voice of Customer</a>
+<a class="{% if request.resolver_match.url_name == 'products' or request.resolver_match.url_name == 'product' %}active{% endif %}" href="{% url 'products' %}"><span>◇</span>Каталог товаров</a>
+<a class="{% if request.resolver_match.url_name == 'imports' %}active{% endif %}" href="{% url 'imports' %}"><span>⇄</span>Product Mapping</a>
+<span class="nav-label">УПРАВЛЕНИЕ</span>
+<a class="{% if request.resolver_match.url_name == 'integrations' %}active{% endif %}" href="{% url 'integrations' %}"><span>⌘</span>Интеграции</a>
+<a class="{% if request.resolver_match.url_name == 'tone' %}active{% endif %}" href="{% url 'tone' %}"><span>≋</span>Tone of Voice</a>
+{% if user.is_superuser %}<a href="/admin/auth/user/"><span>♧</span>Пользователи и команды</a><a href="/admin/"><span>⚙</span>Настройки</a>{% endif %}
+</nav><div class="sidebar-bottom"><div class="help-card"><b>Каждое сообщение — сигнал</b><p>Но не каждый сигнал — проблема.</p><a href="{% url 'voc' %}">Перейти к аналитике ↗</a></div><div class="profile"><span class="avatar">{{ user.username|first|upper }}</span><div><b>{{ user.get_full_name|default:user.username }}</b><small>{% if user.is_superuser %}Администратор{% else %}Сотрудник{% endif %}</small></div><form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="icon-button" title="Выйти">↪</button></form></div></div></aside>
+<div class="main"><header class="topbar"><span>Рабочее пространство <span class="slash">/</span> <strong>{% block breadcrumb %}Inbox{% endblock %}</strong></span><div>{% if has_demo %}<span class="pill neutral">Демо-данные</span>{% endif %}<span class="top-date">{% now 'd E Y' %}</span></div></header><main>
+{% for message in messages %}<div role="status" class="notice {{ message.tags }}">{{ message }}</div>{% endfor %}
+{% block content %}{% endblock %}</main><footer>VOICE · Unified Customer Communication &amp; Voice of Customer <span>MVP 0.1</span></footer></div></body></html>
