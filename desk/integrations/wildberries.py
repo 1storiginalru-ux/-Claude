@@ -1,8 +1,18 @@
 from .base import Adapter, Incoming, IntegrationError, timestamp
+from django.utils import timezone
 
 
 class Wildberries(Adapter):
     base_url = 'https://feedbacks-api.wildberries.ru'
+    page_size = 1000
+
+    def before_request(self, token):
+        from .rate_limit import acquire
+        acquire(token)
+
+    def after_response(self, token, response):
+        from .rate_limit import observe
+        return observe(token, response)
 
     def parse(self, row, kind):
         product = row.get('productDetails') or {}
@@ -15,15 +25,28 @@ class Wildberries(Adapter):
         return Incoming(str(row['id']), kind, text or '(Отзыв без текста)', str(product.get('supplierArticle') or ''), row.get('userName') or 'Покупатель', row.get('productValuation') if kind == 'review' else None, timestamp(row.get('createdDate')), replies)
 
     def fetch(self):
-        for kind, key in [('review', 'feedbacks'), ('question', 'questions')]:
-            for answered in ['false', 'true']:
-                for page in range(2000):
-                    data = self.request('GET', f'/api/v1/{key}', params={'isAnswered': answered, 'take': 100, 'skip': page * 100, 'order': 'dateAsc'})
-                    rows = data.get('data', {}).get(key)
-                    if not isinstance(rows, list): raise IntegrationError('Неожиданная структура ответа Wildberries.')
-                    for row in rows: yield self.parse(row, kind)
-                    if len(rows) < 100: break
-                else: raise IntegrationError('Достигнут предел страниц WB; требуется backfill.')
+        cursor = dict(self.sync_cursor)
+        if 'until' not in cursor:
+            cursor.update(until=int(timezone.now().timestamp()), since=max(0, cursor.get('watermark', 0) - 86400), stream=0, skip=0)
+            self.checkpoint(dict(cursor))
+        streams = [('review', 'feedbacks', 'false'), ('question', 'questions', 'false'), ('review', 'feedbacks', 'true'), ('question', 'questions', 'true')]
+        while cursor['stream'] < len(streams):
+            kind, key, answered = streams[cursor['stream']]
+            if cursor['skip'] >= 200000:
+                raise IntegrationError('Достигнут предел истории WB; нужен отдельный backfill по периодам.')
+            params = {'isAnswered': answered, 'take': self.page_size, 'skip': cursor['skip'], 'order': 'dateDesc', 'dateTo': cursor['until']}
+            if cursor['since']: params['dateFrom'] = cursor['since']
+            data = self.request('GET', f'/api/v1/{key}', params=params)
+            rows = data.get('data', {}).get(key)
+            if not isinstance(rows, list): raise IntegrationError('Неожиданная структура ответа Wildberries.')
+            for row in rows: yield self.parse(row, kind)
+            # Save only after the whole page was consumed and persisted by the caller.
+            if len(rows) < self.page_size:
+                cursor.update(stream=cursor['stream'] + 1, skip=0)
+            else:
+                cursor['skip'] += len(rows)
+            self.checkpoint(dict(cursor))
+        self.checkpoint({'watermark': cursor['until']})
 
     def send(self, thread, text):
         if thread.kind == 'review':

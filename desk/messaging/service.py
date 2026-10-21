@@ -44,11 +44,13 @@ def process_one():
     try:
         external_id = get_adapter(item.thread.account).send(item.thread, item.text)
     except IntegrationError as e:
-        retry = e.retryable and not e.ambiguous and item.attempts < MAX_ATTEMPTS
+        if not e.request_sent:
+            item.attempts = max(0, item.attempts - 1)
+        retry = e.retryable and not e.ambiguous and (e.rate_limited or item.attempts < MAX_ATTEMPTS)
         item.status = 'Queued' if retry else 'Failed'
         item.error, item.retry_safe = str(e)[:240], not e.ambiguous
-        item.next_attempt = now + timedelta(seconds=max(e.retry_after, min(3600, 30 * 2 ** (item.attempts - 1))))
-        item.save(update_fields=['status', 'error', 'retry_safe', 'next_attempt', 'updated_at'])
+        item.next_attempt = timezone.now() + timedelta(seconds=max(e.retry_after, min(3600, 30 * 2 ** max(0, min(item.attempts - 1, 7)))))
+        item.save(update_fields=['status', 'attempts', 'error', 'retry_safe', 'next_attempt', 'updated_at'])
         if not retry: Thread.objects.filter(pk=item.thread_id).update(status='Ошибка отправки')
     except Exception:
         item.status, item.retry_safe = 'Failed', False

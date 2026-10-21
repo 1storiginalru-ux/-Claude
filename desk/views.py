@@ -162,10 +162,10 @@ def imports(request):
 
 @login_required
 def integrations(request):
-    accounts = Account.objects.filter(company__in=companies_for(request.user)).select_related('company')
+    accounts = Account.objects.filter(company__in=companies_for(request.user)).select_related('company', 'sync_state')
     import os
     from .integrations.base import get_adapter
-    rows = [{'account': a, 'has_key': bool(os.environ.get(a.token_env)), 'capabilities': get_adapter(a).capabilities} for a in accounts]
+    rows = [{'account': a, 'has_key': bool(os.environ.get(a.token_env)), 'capabilities': get_adapter(a).capabilities, 'next_attempt': a.sync_state.next_attempt if hasattr(a, 'sync_state') else None, 'paused': hasattr(a, 'sync_state') and a.sync_state.next_attempt > timezone.now() and 'Пауза ' in a.sync_status} for a in accounts]
     return render(request, 'desk/integrations.html', context(request, rows=rows, logs=SyncLog.objects.filter(account__in=accounts).select_related('account').order_by('-created_at')[:20]))
 
 

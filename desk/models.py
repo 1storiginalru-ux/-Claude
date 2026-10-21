@@ -246,4 +246,20 @@ class SyncLog(models.Model):
     account = models.ForeignKey(Account, on_delete=models.CASCADE)
     success = models.BooleanField()
     detail = models.CharField(max_length=240)
+    retry_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ApiThrottle(models.Model):
+    # An opaque digest scopes a shared budget without persisting the API credential.
+    scope = models.CharField(max_length=64, unique=True)
+    next_request_at = models.DateTimeField(default=timezone.now)
+    strikes = models.PositiveIntegerField(default=0)
+
+
+class SyncState(models.Model):
+    account = models.OneToOneField(Account, on_delete=models.CASCADE, related_name='sync_state')
+    cursor = models.JSONField(default=dict)
+    next_attempt = models.DateTimeField(default=timezone.now)
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)

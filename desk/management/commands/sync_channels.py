@@ -1,5 +1,8 @@
 import time
+import signal
 from django.core.management.base import BaseCommand
+from django.db.models import Q
+from django.utils import timezone
 from desk.integrations.base import IntegrationError
 from desk.integrations.sync import sync_account
 from desk.models import Account
@@ -13,11 +16,16 @@ class Command(BaseCommand):
         parser.add_argument('--interval', type=int, default=60)
 
     def handle(self, *args, **options):
+        def stop(signum, frame): raise KeyboardInterrupt
+        previous = signal.signal(signal.SIGTERM, stop)
         try:
             while True:
-                for account in Account.objects.filter(enabled=True, company__is_demo=False).select_related('company'):
+                accounts = Account.objects.filter(enabled=True, company__is_demo=False).filter(Q(sync_state__isnull=True) | Q(sync_state__next_attempt__lte=timezone.now())).select_related('company')
+                for account in accounts:
                     try: self.stdout.write(f'{account.name}: {sync_account(account)} объектов')
                     except IntegrationError as e: self.stderr.write(f'{account.name}: {e}')
                 if not options['loop']: break
                 time.sleep(max(30, options['interval']))
         except KeyboardInterrupt: pass
+        finally:
+            signal.signal(signal.SIGTERM, previous)
