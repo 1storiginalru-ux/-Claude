@@ -64,6 +64,17 @@ def open_when_ready(port, process):
         time.sleep(0.5)
 
 
+def check_port_available(port):
+    try:
+        with socket.socket() as probe:
+            # Match runserver's socket policy: recently closed HTTP connections
+            # may remain in TIME_WAIT after the old listener has stopped.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(('127.0.0.1', port))
+    except OSError as error:
+        raise RuntimeError(f'Порт {port} занят. Остановите прежний запуск или используйте bash start.sh --port {port + 1 if port < 65535 else 8000}.') from error
+
+
 def main():
     parser = argparse.ArgumentParser(description='Запустить Voice на вашем компьютере.')
     parser.add_argument('--port', type=int, default=8000, help='Порт программы (по умолчанию 8000).')
@@ -76,11 +87,7 @@ def main():
     if not 1024 <= options.port <= 65535:
         raise RuntimeError('Выберите порт от 1024 до 65535.')
     if not options.setup_only:
-        try:
-            with socket.socket() as probe:
-                probe.bind(('127.0.0.1', options.port))
-        except OSError as error:
-            raise RuntimeError(f'Порт {options.port} занят. Остановите прежний запуск или используйте bash start.sh --port {options.port + 1 if options.port < 65535 else 8000}.') from error
+        check_port_available(options.port)
     executable = local_python()
     install_dependencies(executable)
     run([executable, ROOT / 'manage.py', 'migrate', '--noinput'])
