@@ -34,7 +34,18 @@ TEMPLATES = [{
     ]},
 }]
 WSGI_APPLICATION = 'config.wsgi.application'
-DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': STATE_DIR / 'voice.sqlite3', 'OPTIONS': {'timeout': 20}}}
+DATABASES = {'default': {
+    'ENGINE': 'django.db.backends.sqlite3',
+    'NAME': STATE_DIR / 'voice.sqlite3',
+    'OPTIONS': {
+        'timeout': 30,
+        # Readers can keep browsing while polling/worker commits short writes.
+        'init_command': 'PRAGMA journal_mode=WAL;',
+        # Reserve the writer before reading inside atomic(). A deferred read ->
+        # write upgrade can fail immediately, regardless of busy_timeout.
+        'transaction_mode': 'IMMEDIATE',
+    },
+}}
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
     {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},

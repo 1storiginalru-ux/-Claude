@@ -1,6 +1,9 @@
 import uuid
 from datetime import timedelta
 from unittest.mock import Mock, patch
+from io import StringIO
+from django.core.management import call_command
+from django.db import OperationalError
 from django.utils import timezone
 from desk.integrations.base import IntegrationError
 from desk.integrations.sync import ingest_reply
@@ -37,6 +40,20 @@ class MessagingTests(DeskCase):
         item.refresh_from_db(); self.assertEqual(item.status, 'Confirmed')
         self.assertIsNotNone(item.confirmed_at)
         self.assertFalse(process_one())
+
+    @patch('desk.messaging.service.get_adapter')
+    def test_database_busy_after_publication_never_repeats_the_send(self, factory):
+        factory.return_value.send.return_value = 'published-on-marketplace'
+        item = self.enqueue()
+        # The API has returned success, but the following local commit fails.
+        with patch.object(Outgoing, 'save', side_effect=OperationalError('database is locked')):
+            call_command('worker', '--once', stdout=StringIO(), stderr=StringIO())
+        item.refresh_from_db()
+        self.assertEqual(item.status, 'Sending')
+        call_command('worker', '--once', stdout=StringIO(), stderr=StringIO())
+        factory.return_value.send.assert_called_once()
+        item.refresh_from_db()
+        self.assertEqual(item.status, 'Sending')
 
     @patch('desk.messaging.service.get_adapter')
     def test_rate_limit_schedules_exponential_backoff(self, factory):

@@ -1,5 +1,7 @@
 import time
 from django.core.management.base import BaseCommand
+from django.db import OperationalError
+from desk.db import is_database_busy
 from desk.messaging.service import process_one
 
 
@@ -12,7 +14,16 @@ class Command(BaseCommand):
         processed = 0
         try:
             while True:
-                if process_one():
+                try:
+                    handled = process_one()
+                except OperationalError as error:
+                    if not is_database_busy(error): raise
+                    # process_one never reclaims Sending automatically. If a
+                    # publication happened before this error, preserve that
+                    # uncertain state instead of repeating the external send.
+                    self.stderr.write('База временно занята. Очередь проверится повторно; начатые отправки не дублируются.')
+                    handled = False
+                if handled:
                     processed += 1
                 elif options['once']: break
                 else: time.sleep(1)
