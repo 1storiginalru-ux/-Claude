@@ -23,6 +23,8 @@ class Incoming:
     rating: int | None = None
     created_at: datetime | None = None
     replies: list = field(default_factory=list)
+    source_data: dict | None = None
+    history_complete: bool = False
 
 
 def timestamp(value):
@@ -32,7 +34,7 @@ def timestamp(value):
 
 
 class Adapter:
-    capabilities = {'fetch_reviews': True, 'reply_reviews': True, 'fetch_questions': True, 'reply_questions': True, 'chats': False, 'attachments': False, 'sales_sync': False}
+    capabilities = {'fetch_reviews': True, 'reply_reviews': True, 'fetch_questions': True, 'reply_questions': True, 'chats': False, 'attachments': True, 'sales_sync': False}
     base_url = ''
 
     def __init__(self, account):

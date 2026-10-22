@@ -19,19 +19,37 @@ def ingest(account, incoming):
         if thread.status == 'Закрыто':
             thread.status, thread.closed_at = 'Новое', None
         thread.save(update_fields=['text', 'rating', 'status', 'closed_at'])
+    if incoming.source_data is not None:
+        now = timezone.now()
+        updates = {'source_data': incoming.source_data, 'source_synced_at': now}
+        old_statistics = (thread.source_data or {}).get('statistics') or {}
+        new_statistics = incoming.source_data.get('statistics') or {}
+        if account.platform == 'ym' and thread.kind == 'review' and old_statistics.get('commentsCount') != new_statistics.get('commentsCount'):
+            updates.update(details_next_attempt=now, history_cursor={})
+        # Keep source metadata current without reopening a closed conversation
+        # or re-running text AI solely because e.g. a like count changed.
+        if incoming.history_complete:
+            updates.update(history_synced_at=now, details_next_attempt=now + timedelta(days=1), details_error='', history_cursor={})
+        Thread.objects.filter(pk=thread.pk).update(**updates)
+        for key, value in updates.items(): setattr(thread, key, value)
     revision = hashlib.sha256(incoming.text.encode()).hexdigest()[:24]
-    Message.objects.get_or_create(thread=thread, external_id='source-' + revision, direction='in', defaults={'text': incoming.text, 'created_at': received})
+    message, _ = Message.objects.get_or_create(thread=thread, external_id='source-' + revision, direction='in', defaults={'text': incoming.text, 'created_at': received})
+    if incoming.source_data is not None:
+        Message.objects.filter(pk=message.pk).update(source_data=incoming.source_data)
     for reply in incoming.replies: ingest_reply(thread, reply)
     return thread, created or changed
 
 
 @transaction.atomic
-def ingest_reply(thread, reply):
+def ingest_reply(thread, reply, *, allow_reopen=True):
     revision = hashlib.sha256(reply['text'].encode()).hexdigest()[:16]
-    _, created = Message.objects.get_or_create(thread=thread, external_id=(reply['external_id'] + '-' + revision)[:200], direction=reply['direction'], defaults={'text': reply['text']})
+    message, created = Message.objects.get_or_create(thread=thread, external_id=(reply['external_id'] + '-' + revision)[:200], direction=reply['direction'], defaults={'text': reply['text'], 'created_at': reply.get('created_at') or timezone.now()})
+    if 'source_data' in reply:
+        Message.objects.filter(pk=message.pk).update(source_data=reply['source_data'])
     if reply['direction'] == 'out' and reply['published']:
         Outgoing.objects.filter(thread=thread, external_id=reply['external_id'], text=reply['text'], status='Sent').update(status='Confirmed', confirmed_at=timezone.now(), error='')
-    if created and reply['direction'] == 'in' and thread.status in {'Закрыто', 'Ожидаем клиента', 'Ответ отправлен'}:
+    historical = bool(reply.get('created_at') and thread.closed_at and reply['created_at'] <= thread.closed_at)
+    if allow_reopen and not historical and created and reply['direction'] == 'in' and thread.status in {'Закрыто', 'Ожидаем клиента', 'Ответ отправлен'}:
         thread.status, thread.closed_at = 'Новое', None
         thread.due_at = timezone.now() + timedelta(minutes=thread.account.company.sla_minutes)
         thread.save(update_fields=['status', 'closed_at', 'due_at'])
@@ -66,20 +84,26 @@ def sync_account(account):
     adapter.sync_cursor, adapter.checkpoint = state.cursor, checkpoint
     try:
         from desk.ai.provider import analyze, AIProblem
+        def ensure_analysis(thread, changed):
+            nonlocal analysis_errors
+            if changed or not hasattr(thread, 'analysis'):
+                try: analyze(thread)
+                except AIProblem: analysis_errors += 1
         # Confirm published outgoing replies before spending the budget on history.
         pending = Outgoing.objects.filter(thread__account=account, status='Sent', next_attempt__lte=now).select_related('thread__account__company').order_by('next_attempt')[:20]
         for outgoing in pending:
-            for reply in adapter.replies(outgoing.thread): ingest_reply(outgoing.thread, reply)
+            for reply in adapter.replies(outgoing.thread):
+                ingest_reply(outgoing.thread, reply, allow_reopen=outgoing.thread.history_synced_at is not None)
             Outgoing.objects.filter(pk=outgoing.pk, status='Sent').update(next_attempt=timezone.now() + timedelta(seconds=60))
             heartbeat()
         for incoming in adapter.fetch():
             thread, changed = ingest(account, incoming)
             count += 1
-            if changed or not hasattr(thread, 'analysis'):
-                try: analyze(thread)
-                except AIProblem: analysis_errors += 1
+            ensure_analysis(thread, changed)
             heartbeat()
-        detail = f'Получено: {count}; ошибок AI: {analysis_errors}'
+        from .details import enrich_account
+        enriched = enrich_account(account, adapter, heartbeat=heartbeat, on_change=ensure_analysis)
+        detail = f'Получено: {count}; дополнено: {enriched}; ошибок AI: {analysis_errors}'
         Account.objects.filter(pk=account.pk).update(last_sync=timezone.now(), sync_status=detail)
         SyncState.objects.filter(pk=state.pk, lease_token=lease).update(next_attempt=timezone.now() + timedelta(seconds=60))
         SyncLog.objects.create(account=account, success=True, detail=detail)

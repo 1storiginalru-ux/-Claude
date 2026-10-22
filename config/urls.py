@@ -14,6 +14,7 @@ urlpatterns = [
     path('logout/', auth.LogoutView.as_view(), name='logout'),
     path('', views.inbox, name='inbox'),
     path('threads/<int:pk>/', views.thread_detail, name='thread'),
+    path('threads/<int:pk>/source/', views.thread_source, name='thread_source'),
     path('threads/<int:pk>/action/', views.thread_action, name='thread_action'),
     path('products/', views.products, name='products'),
     path('products/<int:pk>/', views.product_detail, name='product'),

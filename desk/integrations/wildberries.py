@@ -16,14 +16,15 @@ class Wildberries(Adapter):
         return observe(token, response)
 
     def parse(self, row, kind):
+        if not isinstance(row, dict): raise IntegrationError('Wildberries не вернул данные обращения.')
         product = row.get('productDetails') or {}
         text = '\n'.join(str(row.get(k) or '') for k in ['text', 'pros', 'cons']).strip()
         answer = row.get('answer') or {}
         replies = []
         if answer.get('text'):
             state = answer.get('state') if kind == 'review' else row.get('state')
-            replies.append({'external_id': 'answer-' + str(row['id']), 'text': answer['text'], 'direction': 'out', 'published': state == 'wbRu'})
-        return Incoming(str(row['id']), kind, text or '(Отзыв без текста)', str(product.get('supplierArticle') or ''), row.get('userName') or 'Покупатель', row.get('productValuation') if kind == 'review' else None, timestamp(row.get('createdDate')), replies)
+            replies.append({'external_id': 'answer-' + str(row['id']), 'text': answer['text'], 'direction': 'out', 'published': state == 'wbRu', 'source_data': answer})
+        return Incoming(str(row['id']), kind, text or '(Отзыв без текста)', str(product.get('supplierArticle') or ''), row.get('userName') or 'Покупатель', row.get('productValuation') if kind == 'review' else None, timestamp(row.get('createdDate')), replies, source_data=row, history_complete=True)
 
     def fetch(self):
         cursor = dict(self.sync_cursor)
@@ -38,7 +39,8 @@ class Wildberries(Adapter):
             params = {'isAnswered': answered, 'take': self.page_size, 'skip': cursor['skip'], 'order': 'dateDesc', 'dateTo': cursor['until']}
             if cursor['since']: params['dateFrom'] = cursor['since']
             data = self.request('GET', f'/api/v1/{key}', params=params)
-            rows = data.get('data', {}).get(key)
+            body = data.get('data')
+            rows = body.get(key) if isinstance(body, dict) else None
             if not isinstance(rows, list): raise IntegrationError('Неожиданная структура ответа Wildberries.')
             for row in rows: yield self.parse(row, kind)
             # Save only after the whole page was consumed and persisted by the caller.
@@ -57,6 +59,9 @@ class Wildberries(Adapter):
         return 'answer-' + thread.external_id
 
     def replies(self, thread):
+        return self.fetch_one(thread).replies
+
+    def fetch_one(self, thread):
         endpoint = 'feedback' if thread.kind == 'review' else 'question'
         data = self.request('GET', f'/api/v1/{endpoint}', params={'id': thread.external_id})
-        return self.parse(data['data'], thread.kind).replies
+        return self.parse(data['data'], thread.kind)

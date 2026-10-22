@@ -133,6 +133,12 @@ class Thread(models.Model):
     status = models.CharField(max_length=50, choices=STATUSES, default='Новое')
     assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     closed_at = models.DateTimeField(null=True, blank=True)
+    source_data = models.JSONField(default=dict, blank=True)
+    source_synced_at = models.DateTimeField(null=True, blank=True)
+    history_synced_at = models.DateTimeField(null=True, blank=True)
+    history_cursor = models.JSONField(default=dict, blank=True)
+    details_next_attempt = models.DateTimeField(default=timezone.now, db_index=True)
+    details_error = models.CharField(max_length=240, blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['account', 'kind', 'external_id'], name='thread_external_unique')]
@@ -145,6 +151,13 @@ class Message(models.Model):
     direction = models.CharField(max_length=10, choices=[('in', 'Входящее'), ('out', 'Исходящее')])
     text = models.TextField()
     created_at = models.DateTimeField(default=timezone.now)
+    source_data = models.JSONField(default=dict, blank=True)
+
+    @property
+    def source_author(self):
+        if not isinstance(self.source_data, dict): return ''
+        author = self.source_data.get('author') or self.source_data.get('userName')
+        return author.get('name', '') if isinstance(author, dict) else (author or '')
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['thread', 'external_id', 'direction'], name='message_external_unique')]

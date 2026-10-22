@@ -99,6 +99,7 @@ class SharedThrottleTests(DeskCase):
 
 
 @patch.object(Wildberries, 'page_size', 2)
+@patch('desk.integrations.details.enrich_account', new=lambda *args, **kwargs: 0)
 class ResumableSyncTests(DeskCase):
     def row(self, number):
         return {'id': f'wb-{number}', 'text': 'Отзыв', 'productDetails': {'supplierArticle': 'sku1'}, 'productValuation': 5}
@@ -177,6 +178,22 @@ class ResumableSyncTests(DeskCase):
         self.assertEqual([call[0] for call in adapter.method_calls], ['replies', 'fetch'])
         item.refresh_from_db()
         self.assertGreater(item.next_attempt, timezone.now())
+
+    @patch('desk.integrations.sync.get_adapter')
+    def test_first_confirmation_does_not_reopen_for_old_customer_history(self, factory):
+        self.thread.status = 'Ответ отправлен'
+        self.thread.save(update_fields=['status'])
+        item = Outgoing.objects.create(thread=self.thread, request_key=uuid.uuid4(), sender=self.user, text='Ответ', status='Sent', external_id='published-reply')
+        factory.return_value.replies.return_value = [
+            {'external_id': 'old-customer-comment', 'text': 'Ранний комментарий', 'direction': 'in', 'published': True},
+            {'external_id': item.external_id, 'text': item.text, 'direction': 'out', 'published': True},
+        ]
+        factory.return_value.fetch.return_value = []
+        sync_account(self.account)
+        self.thread.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(self.thread.status, 'Ответ отправлен')
+        self.assertEqual(item.status, 'Confirmed')
 
     def test_ui_shows_retry_time_as_deferred_instead_of_success(self):
         deadline = timezone.now() + timedelta(minutes=12)

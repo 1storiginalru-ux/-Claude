@@ -51,11 +51,25 @@ def inbox(request):
 
 @login_required
 def thread_detail(request, pk):
+    from .integrations.content import content_view
     thread = get_object_or_404(scoped_threads(request.user), pk=pk)
     analysis = getattr(thread, 'analysis', None)
     metrics = [evaluate(thread.product, s, scope=companies_for(request.user)) for s in analysis.signals] if thread.product_id and analysis else []
     can_reply = request.user.is_superuser or Membership.objects.filter(user=request.user, company=thread.account.company, role__in=OPERATORS).exists()
-    return render(request, 'desk/thread.html', context(request, thread=thread, analysis=analysis, metrics=metrics, request_key=str(uuid.uuid4()), can_reply=can_reply, human_only=human_only({'signals': analysis.signals, 'severity': analysis.severity}) if analysis else False, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()))
+    return render(request, 'desk/thread.html', context(request, thread=thread, source_content=content_view(thread), analysis=analysis, metrics=metrics, request_key=str(uuid.uuid4()), can_reply=can_reply, human_only=human_only({'signals': analysis.signals, 'severity': analysis.severity}) if analysis else False, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()))
+
+
+@login_required
+def thread_source(request, pk):
+    thread = get_object_or_404(scoped_threads(request.user), pk=pk)
+    payload = {'platform': thread.account.platform, 'external_id': thread.external_id,
+               'fetched_at': thread.source_synced_at, 'source': thread.source_data,
+               'history_fetched_at': thread.history_synced_at,
+               'messages': list(thread.messages.values('external_id', 'direction', 'text', 'created_at', 'source_data'))}
+    response = JsonResponse(payload, json_dumps_params={'ensure_ascii': False, 'indent': 2})
+    response['Content-Disposition'] = f'attachment; filename="review-{thread.pk}.json"'
+    response['Cache-Control'] = 'private, no-store'
+    return response
 
 
 @login_required
@@ -162,7 +176,7 @@ def imports(request):
 
 @login_required
 def integrations(request):
-    accounts = Account.objects.filter(company__in=companies_for(request.user)).select_related('company', 'sync_state')
+    accounts = Account.objects.filter(company__in=companies_for(request.user)).select_related('company', 'sync_state').annotate(total_threads=Count('thread'), full_threads=Count('thread', filter=Q(thread__source_synced_at__isnull=False)), history_threads=Count('thread', filter=Q(thread__history_synced_at__isnull=False)))
     import os
     from .integrations.base import get_adapter
     rows = [{'account': a, 'has_key': bool(os.environ.get(a.token_env)), 'capabilities': get_adapter(a).capabilities, 'next_attempt': a.sync_state.next_attempt if hasattr(a, 'sync_state') else None, 'paused': hasattr(a, 'sync_state') and a.sync_state.next_attempt > timezone.now() and 'Пауза ' in a.sync_status} for a in accounts]
