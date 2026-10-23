@@ -1,6 +1,8 @@
 import copy
 import os
 from unittest.mock import Mock, patch
+from datetime import timedelta
+from django.utils import timezone
 from desk.ai.provider import AIProblem, analyze, local_classify, validate_result
 from desk.integrations.base import Incoming, IntegrationError, get_adapter
 from desk.integrations.sync import ingest
@@ -58,10 +60,11 @@ class IntegrationTests(DeskCase):
 
     @patch('desk.integrations.yandex.YandexMarket.request')
     def test_yandex_review_and_question_contracts_and_pagination(self, request):
+        created = (timezone.now() - timedelta(hours=1)).isoformat()
         request.side_effect = [
-            {'result': {'feedbacks': [{'feedbackId': 10, 'identifiers': {'offerId': 'sku1'}, 'statistics': {'rating': 5}, 'description': {'disadvantages': 'Не держится'}, 'author': 'Анна'}], 'paging': {'nextPageToken': 'page2'}}},
+            {'result': {'feedbacks': [{'feedbackId': 10, 'createdAt': created, 'identifiers': {'offerId': 'sku1'}, 'statistics': {'rating': 5}, 'description': {'disadvantages': 'Не держится'}, 'author': 'Анна'}], 'paging': {'nextPageToken': 'page2'}}},
             {'result': {'feedbacks': []}},
-            {'result': {'questions': [{'questionIdentifiers': {'id': 20, 'offerId': 'sku1'}, 'text': 'Какой объём?', 'author': {'name': 'Дима'}}]}},
+            {'result': {'questions': [{'questionIdentifiers': {'id': 20, 'offerId': 'sku1'}, 'createdAt': created, 'text': 'Какой объём?', 'author': {'name': 'Дима'}}]}},
         ]
         rows = list(get_adapter(self.ym).fetch())
         self.assertEqual([(r.external_id, r.kind, r.sku) for r in rows], [('10', 'review', 'sku1'), ('20', 'question', 'sku1')])

@@ -4,13 +4,15 @@ from django.utils import timezone
 from desk.models import Thread
 from .base import IntegrationError
 from .sync import ingest, ingest_reply
+from .window import sync_window, within_window
 
 
 def enrich_account(account, adapter, *, heartbeat=lambda: None, on_change=lambda thread, changed: None, limit=10):
-    now = timezone.now()
-    candidates = list(Thread.objects.filter(account=account, details_next_attempt__lte=now).order_by('details_next_attempt', 'pk')[:limit])
+    since, now = sync_window()
+    candidates = list(Thread.objects.filter(account=account, details_next_attempt__lte=now, received_at__gte=since, received_at__lte=now).order_by('details_next_attempt', 'pk')[:limit])
     completed = 0
     for thread in candidates:
+        if not within_window(thread.received_at): continue
         thread.account = account
         try:
             # List polling refreshes recent source data. Older records and WB's
@@ -19,6 +21,11 @@ def enrich_account(account, adapter, *, heartbeat=lambda: None, on_change=lambda
                 incoming = adapter.fetch_one(thread)
                 if incoming.external_id != thread.external_id or incoming.kind != thread.kind:
                     raise IntegrationError('API вернул другое обращение при запросе по ID.')
+                source_date = incoming.created_at
+                if isinstance(incoming.source_data, dict):
+                    source_date = incoming.source_data.get('createdDate' if account.platform == 'wb' else 'createdAt')
+                if not within_window(source_date):
+                    raise IntegrationError('Обращение вне периода синхронизации: последние 7 суток.')
                 thread, changed = ingest(account, incoming)
                 thread.account = account
                 on_change(thread, changed)

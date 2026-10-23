@@ -17,7 +17,7 @@ from .base import DeskCase
 
 WB_ROW = {
     'id': 'full-wb', 'text': 'Комментарий', 'pros': 'Удобно', 'cons': 'Коробка помята',
-    'productValuation': 4, 'createdDate': '2026-10-20T12:00:00Z', 'userName': 'Анна',
+    'productValuation': 4, 'createdDate': (timezone.now() - timedelta(days=3)).isoformat(), 'userName': 'Анна',
     'productDetails': {'supplierArticle': 'sku1', 'nmId': 123, 'productName': 'Парфюм', 'brandName': 'Бренд'},
     'photoLinks': [{'fullSize': 'https://cdn.example.com/full.jpg', 'miniSize': 'https://cdn.example.com/small.jpg'}],
     'video': {'link': 'https://cdn.example.com/video.m3u8', 'previewImage': 'https://cdn.example.com/poster.jpg', 'durationSec': 25},
@@ -26,7 +26,7 @@ WB_ROW = {
     'futureField': {'nested': ['keep', 1, False]},
 }
 YM_ROW = {
-    'feedbackId': 10, 'createdAt': '2026-10-20T12:00:00Z', 'author': 'Мария',
+    'feedbackId': 10, 'createdAt': (timezone.now() - timedelta(days=3)).isoformat(), 'author': 'Мария',
     'identifiers': {'offerId': 'sku1', 'orderId': 654321},
     'description': {'advantages': 'Удобно', 'disadvantages': 'Течёт', 'comment': 'Комментарий'},
     'statistics': {'rating': 4, 'commentsCount': 2, 'recommended': False, 'paidAmount': 100},

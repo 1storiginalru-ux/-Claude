@@ -1,5 +1,6 @@
+import math
 from .base import Adapter, Incoming, IntegrationError, timestamp
-from django.utils import timezone
+from .window import LOOKBACK_DAYS, sync_window, within_window
 
 
 class Wildberries(Adapter):
@@ -26,30 +27,42 @@ class Wildberries(Adapter):
             replies.append({'external_id': 'answer-' + str(row['id']), 'text': answer['text'], 'direction': 'out', 'published': state == 'wbRu', 'source_data': answer})
         return Incoming(str(row['id']), kind, text or '(Отзыв без текста)', str(product.get('supplierArticle') or ''), row.get('userName') or 'Покупатель', row.get('productValuation') if kind == 'review' else None, timestamp(row.get('createdDate')), replies, source_data=row, history_complete=True)
 
+    def window_cursor(self, cursor=None, *, now=None):
+        since, until = sync_window(now)
+        lower, upper = math.ceil(since.timestamp()), int(until.timestamp())
+        cursor = dict(self.sync_cursor if cursor is None else cursor)
+        if (cursor.get('lookback_days') != LOOKBACK_DAYS or not isinstance(cursor.get('until'), int)
+                or not lower <= cursor['until'] <= upper):
+            return {'lookback_days': LOOKBACK_DAYS, 'since': lower, 'until': upper, 'stream': 0, 'skip': 0}
+        # dateDesc pagination stays stable when only the oldest tail expires.
+        cursor['since'] = lower
+        return cursor
+
     def fetch(self):
-        cursor = dict(self.sync_cursor)
-        if 'until' not in cursor:
-            cursor.update(until=int(timezone.now().timestamp()), since=max(0, cursor.get('watermark', 0) - 86400), stream=0, skip=0)
-            self.checkpoint(dict(cursor))
+        cursor = self.window_cursor()
+        self.checkpoint(dict(cursor))
         streams = self.streams
         while cursor['stream'] < len(streams):
+            cursor = self.window_cursor(cursor)
             kind, key, answered = streams[cursor['stream']]
             if cursor['skip'] >= 200000:
                 raise IntegrationError('Достигнут предел истории WB; нужен отдельный backfill по периодам.')
             params = {'isAnswered': answered, 'take': self.page_size, 'skip': cursor['skip'], 'order': 'dateDesc', 'dateTo': cursor['until']}
-            if cursor['since']: params['dateFrom'] = cursor['since']
+            params['dateFrom'] = cursor['since']
             data = self.request('GET', f'/api/v1/{key}', params=params)
             body = data.get('data')
             rows = body.get(key) if isinstance(body, dict) else None
             if not isinstance(rows, list): raise IntegrationError('Неожиданная структура ответа Wildberries.')
-            for row in rows: yield self.parse(row, kind)
+            since, until = sync_window()
+            for row in rows:
+                if within_window(row.get('createdDate'), since, until): yield self.parse(row, kind)
             # Save only after the whole page was consumed and persisted by the caller.
             if len(rows) < self.page_size:
                 cursor.update(stream=cursor['stream'] + 1, skip=0)
             else:
                 cursor['skip'] += len(rows)
             self.checkpoint(dict(cursor))
-        self.checkpoint({'watermark': cursor['until']})
+        self.checkpoint({'watermark': cursor['until'], 'lookback_days': LOOKBACK_DAYS})
 
     def send(self, thread, text):
         if thread.kind == 'review':

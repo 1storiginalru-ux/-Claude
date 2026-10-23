@@ -8,7 +8,7 @@
     {% if source_content.info %}<dl class="source-info">{% for item in source_content.info %}<div><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></div>{% endfor %}</dl>{% endif %}
     <details class="source-json"><summary>Все поля, полученные от маркетплейса</summary><pre>{{ source_content.raw }}</pre></details>
     <a class="button small" href="{% url 'thread_source' thread.pk %}">Скачать данные и историю (JSON)</a>
-  {% else %}<p>Полные данные ещё не загружены. Они будут добавлены при фоновой синхронизации с учётом лимитов маркетплейса.</p>{% endif %}
-  {% if thread.history_synced_at %}<p class="muted">История ответов проверена {{ thread.history_synced_at|date:'d.m.Y H:i' }}.</p>{% elif thread.source_synced_at %}<p class="muted">Дополнительная история ответов ожидает фоновой загрузки.</p>{% endif %}
+  {% elif within_sync_window %}<p>Полные данные ещё не загружены. Они будут добавлены при фоновой синхронизации с учётом лимитов маркетплейса.</p>{% else %}<p>Обращение вне последних 7 суток. Сохранённая история доступна, автоматическая дозагрузка старых данных отключена.</p>{% endif %}
+  {% if thread.history_synced_at %}<p class="muted">История ответов проверена {{ thread.history_synced_at|date:'d.m.Y H:i' }}.</p>{% elif thread.source_synced_at and within_sync_window %}<p class="muted">Дополнительная история ответов ожидает фоновой загрузки.</p>{% endif %}
   {% if thread.details_error %}<div class="notice warning">Дополнение данных отложено: {{ thread.details_error }}</div>{% endif %}
 </section>

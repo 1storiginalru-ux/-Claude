@@ -1,4 +1,5 @@
 import os
+import math
 from datetime import timedelta
 from io import StringIO
 from unittest.mock import Mock, patch
@@ -46,14 +47,16 @@ class DiagnoseWBTests(DeskCase):
 
     @patch('desk.integrations.base.requests.request')
     def test_one_small_read_reports_limit_but_does_not_move_cursor(self, request):
-        cursor = {'until': int(timezone.now().timestamp()), 'since': 100, 'stream': 1, 'skip': 1000}
+        cursor = {'lookback_days': 7, 'until': int(timezone.now().timestamp()), 'since': math.ceil((timezone.now() - timedelta(days=7)).timestamp()), 'stream': 1, 'skip': 1000}
         state = SyncState.objects.create(account=self.account, cursor=cursor)
         request.return_value = Mock(status_code=200, content=b'{}', headers={'X-Ratelimit-Remaining': '2'})
         request.return_value.json.return_value = {'data': {'questions': [{'id': 'not-ingested'}]}}
         output = self.run_command('--probe')
         request.assert_called_once()
         self.assertEqual(request.call_args.args, ('GET', 'https://feedbacks-api.wildberries.ru/api/v1/questions'))
-        self.assertEqual(request.call_args.kwargs['params'], {'isAnswered': 'false', 'take': 1, 'skip': 1000, 'order': 'dateDesc', 'dateTo': cursor['until'], 'dateFrom': 100})
+        params = request.call_args.kwargs['params']
+        self.assertGreaterEqual(params['dateFrom'], cursor['since'])
+        self.assertEqual({key: value for key, value in params.items() if key != 'dateFrom'}, {'isAnswered': 'false', 'take': 1, 'skip': 1000, 'order': 'dateDesc', 'dateTo': cursor['until']})
         state.refresh_from_db()
         self.assertEqual(state.cursor, cursor)
         self.assertEqual(Thread.objects.count(), 1)
@@ -72,6 +75,21 @@ class DiagnoseWBTests(DeskCase):
         self.assertNotIn(self.token, output)
         self.assertNotIn('PRIVATE', output)
         self.assertGreater(ApiThrottle.objects.get(scope=scope_for(self.token)).next_request_at, timezone.now() + timedelta(seconds=650))
+
+    @patch('desk.integrations.base.requests.request')
+    def test_probe_cannot_resume_an_old_unbounded_archive(self, request):
+        now = timezone.now()
+        cursor = {'until': int(now.timestamp()), 'since': 0, 'stream': 2, 'skip': 9000}
+        state = SyncState.objects.create(account=self.account, cursor=cursor, next_attempt=now - timedelta(seconds=1))
+        request.return_value = Mock(status_code=200, content=b'{}', headers={'X-Ratelimit-Remaining': '2'})
+        request.return_value.json.return_value = {'data': {'feedbacks': []}}
+        output = self.run_command('--probe')
+        self.assertEqual(request.call_args.args[1], 'https://feedbacks-api.wildberries.ru/api/v1/feedbacks')
+        self.assertEqual(request.call_args.kwargs['params']['skip'], 0)
+        self.assertGreaterEqual(request.call_args.kwargs['params']['dateFrom'], int((now - timedelta(days=7)).timestamp()))
+        self.assertIn('последние 7 суток', output)
+        state.refresh_from_db()
+        self.assertEqual(state.cursor, cursor)
 
     @patch('desk.integrations.base.requests.request')
     def test_probe_requires_explicit_choice_if_multiple_accounts(self, request):

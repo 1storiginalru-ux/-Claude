@@ -1,4 +1,6 @@
 from .base import Adapter, Incoming, IntegrationError, timestamp
+from django.utils import timezone
+from .window import sync_window, within_window
 
 
 class YandexMarket(Adapter):
@@ -38,10 +40,17 @@ class YandexMarket(Adapter):
         return Incoming(str(ids['id']), 'question', row['text'], str(ids['offerId']), row.get('author', {}).get('name') or 'Покупатель', None, timestamp(row.get('createdAt')), source_data=row)
 
     def fetch(self):
-        for row in self.pages('goods-feedback', 'feedbacks', {}):
-            yield self.parse(row, 'review')
-        for row in self.pages('goods-questions', 'questions', {}, 1):
-            yield self.parse(row, 'question')
+        since, until = sync_window()
+        review_filter = {'dateTimeFrom': since.isoformat(), 'dateTimeTo': until.isoformat()}
+        for row in self.pages('goods-feedback', 'feedbacks', review_filter):
+            if within_window(row.get('createdAt'), max(since, sync_window()[0]), until):
+                yield self.parse(row, 'review')
+        # The questions endpoint accepts dates, rather than timestamps. Filter
+        # its response again to enforce the exact rolling seven-day boundary.
+        question_filter = {'dateFrom': timezone.localdate(since).isoformat(), 'dateTo': timezone.localdate(until).isoformat()}
+        for row in self.pages('goods-questions', 'questions', question_filter, 1):
+            if within_window(row.get('createdAt'), max(since, sync_window()[0]), until):
+                yield self.parse(row, 'question')
 
     def fetch_one(self, thread):
         if thread.kind == 'review':

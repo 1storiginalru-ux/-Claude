@@ -60,7 +60,9 @@ class Command(BaseCommand):
             self.stdout.write(f'API-ключ в этом Terminal: {"задан" if token else "не задан"}')
             self.stdout.write(f'Обращений в базе: {Thread.objects.filter(account=account).count()}')
             state = SyncState.objects.filter(account=account).first()
-            cursor = state.cursor if state else {}
+            adapter = DiagnosticAdapter(account)
+            adapter.sync_cursor = state.cursor if state else {}
+            cursor = adapter.window_cursor()
             stream = cursor.get('stream', 0)
             if not isinstance(stream, int) or not 0 <= stream <= len(Wildberries.streams):
                 raise CommandError('Неожиданная позиция загрузки; требуется проверка состояния.')
@@ -69,6 +71,7 @@ class Command(BaseCommand):
                 stream = 0
             kind, endpoint, answered = Wildberries.streams[stream]
             label = 'Отзывы' if kind == 'review' else 'Вопросы'
+            self.stdout.write('Период запроса: последние 7 суток.')
             self.stdout.write(f'Этап: {label}, {"с ответом" if answered == "true" else "без ответа"}; смещение {cursor.get("skip", 0)}')
             now = timezone.now()
             deadlines = []
@@ -92,7 +95,6 @@ class Command(BaseCommand):
             if cursor.get('until'): params['dateTo'] = cursor['until']
             if cursor.get('since'): params['dateFrom'] = cursor['since']
             self.stdout.write(f'Один GET /api/v1/{endpoint}, isAnswered={answered}, take=1.')
-            adapter = DiagnosticAdapter(account)
             adapter.report = []
             try:
                 payload = adapter.request('GET', f'/api/v1/{endpoint}', params=params)

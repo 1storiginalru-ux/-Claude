@@ -102,7 +102,7 @@ class SharedThrottleTests(DeskCase):
 @patch('desk.integrations.details.enrich_account', new=lambda *args, **kwargs: 0)
 class ResumableSyncTests(DeskCase):
     def row(self, number):
-        return {'id': f'wb-{number}', 'text': 'Отзыв', 'productDetails': {'supplierArticle': 'sku1'}, 'productValuation': 5}
+        return {'id': f'wb-{number}', 'createdDate': (timezone.now() - timedelta(hours=1)).isoformat(), 'text': 'Отзыв', 'productDetails': {'supplierArticle': 'sku1'}, 'productValuation': 5}
 
     def empty_pages(self):
         return [{'data': {'feedbacks': []}}, {'data': {'questions': []}}, {'data': {'feedbacks': []}}, {'data': {'questions': []}}]
@@ -129,7 +129,7 @@ class ResumableSyncTests(DeskCase):
         self.assertEqual(request.call_args_list[0].kwargs['params']['skip'], 2)
         self.assertEqual(request.call_args_list[0].kwargs['params']['dateTo'], cutoff)
         state.refresh_from_db()
-        self.assertEqual(state.cursor, {'watermark': cutoff})
+        self.assertEqual(state.cursor, {'watermark': cutoff, 'lookback_days': 7})
         self.assertEqual(Thread.objects.filter(external_id__startswith='wb-').count(), 2)
 
     @patch('desk.ai.provider.analyze')
@@ -149,13 +149,14 @@ class ResumableSyncTests(DeskCase):
         self.assertTrue(all(t.messages.count() == 1 for t in threads))
 
     @patch.object(Wildberries, 'request')
-    def test_completed_history_is_followed_by_incremental_window(self, request):
+    def test_completed_cycle_rechecks_last_seven_days(self, request):
         watermark = int(timezone.now().timestamp()) - 3600
         SyncState.objects.create(account=self.account, cursor={'watermark': watermark})
         request.side_effect = self.empty_pages()
         sync_account(self.account)
         params = request.call_args_list[0].kwargs['params']
-        self.assertEqual(params['dateFrom'], watermark - 86400)
+        self.assertGreaterEqual(params['dateFrom'], int((timezone.now() - timedelta(days=7)).timestamp()))
+        self.assertLessEqual(params['dateFrom'], int((timezone.now() - timedelta(days=7)).timestamp()) + 1)
         self.assertEqual(params['order'], 'dateDesc')
         self.assertEqual(request.call_args_list[1].args[1], '/api/v1/questions')
 
