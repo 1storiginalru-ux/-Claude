@@ -72,7 +72,7 @@ class Product(models.Model):
     code = models.CharField('ProductID', max_length=100)
     name = models.CharField(max_length=200)
     brand = models.CharField(max_length=100, blank=True)
-    volume = models.CharField(max_length=40, blank=True)
+    volume = models.CharField(max_length=240, blank=True)
     concentration = models.CharField(max_length=40, blank=True)
 
     class Meta:
@@ -102,6 +102,12 @@ class ProductMapping(models.Model):
         from django.core.exceptions import ValidationError
         if self.product_id and self.account_id and self.product.company_id != self.account.company_id:
             raise ValidationError('Товар и кабинет должны принадлежать одной компании.')
+        if self.account_id and self.account.platform == 'wb' and not self.account.company.is_demo:
+            from .products.identifiers import wb_nm_id
+            card = wb_nm_id(self.sku)
+            if not card or card != wb_nm_id(self.external_product_id):
+                raise ValidationError('Для WB поля SKU и External product id должны содержать одинаковый числовой артикул WB (nmId).')
+            self.sku = self.external_product_id = card
 
 
 class SalesDaily(models.Model):

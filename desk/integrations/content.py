@@ -41,6 +41,7 @@ def content_view(thread):
         pairs = [
             ('Название товара', product.get('productName')), ('Бренд', product.get('brandName')),
             ('Артикул WB', product.get('nmId')), ('ID карточки WB', product.get('imtId')),
+            ('Артикул продавца', product.get('supplierArticle')),
             ('Размер', product.get('size')), ('Цвет', data.get('color')),
             ('Статус заказа', {'buyout': 'Выкуплен', 'rejected': 'Отказ', 'returned': 'Возврат', 'notSpecified': 'Не указан'}.get(data.get('orderStatus'), data.get('orderStatus'))),
             ('Дата покупки', data.get('lastOrderCreatedAt')), ('Категория', data.get('subjectName')),

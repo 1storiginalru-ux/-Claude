@@ -1,6 +1,7 @@
 import math
 from .base import Adapter, Incoming, IntegrationError, timestamp
 from .window import LOOKBACK_DAYS, sync_window, within_window
+from desk.products.identifiers import wb_nm_id
 
 
 class Wildberries(Adapter):
@@ -25,7 +26,7 @@ class Wildberries(Adapter):
         if answer.get('text'):
             state = answer.get('state') if kind == 'review' else row.get('state')
             replies.append({'external_id': 'answer-' + str(row['id']), 'text': answer['text'], 'direction': 'out', 'published': state == 'wbRu', 'source_data': answer})
-        return Incoming(str(row['id']), kind, text or '(Отзыв без текста)', str(product.get('supplierArticle') or ''), row.get('userName') or 'Покупатель', row.get('productValuation') if kind == 'review' else None, timestamp(row.get('createdDate')), replies, source_data=row, history_complete=True)
+        return Incoming(str(row['id']), kind, text or '(Отзыв без текста)', wb_nm_id(product.get('nmId')), row.get('userName') or 'Покупатель', row.get('productValuation') if kind == 'review' else None, timestamp(row.get('createdDate')), replies, source_data=row, history_complete=True)
 
     def window_cursor(self, cursor=None, *, now=None):
         since, until = sync_window(now)

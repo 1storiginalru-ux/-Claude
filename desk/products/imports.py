@@ -5,21 +5,22 @@ from datetime import date
 from django.db import transaction
 from openpyxl import load_workbook
 from desk.models import Account, Audit, Product, ProductMapping, SalesDaily, Thread
+from .identifiers import wb_nm_id
 
 
 class ImportProblem(ValueError):
     pass
 
 
-def read_table(upload):
+def read_table(upload, *, max_rows=5000, max_uncompressed=20 * 1024 * 1024):
     data = upload.read(5 * 1024 * 1024 + 1)
     if len(data) > 5 * 1024 * 1024:
         raise ImportProblem('Максимальный размер файла — 5 МБ.')
     if upload.name.lower().endswith('.xlsx'):
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                if sum(x.file_size for x in archive.infolist()) > 20 * 1024 * 1024:
-                    raise ImportProblem('Распакованный Excel превышает 20 МБ.')
+                if sum(x.file_size for x in archive.infolist()) > max_uncompressed:
+                    raise ImportProblem(f'Распакованный Excel превышает {max_uncompressed // (1024 * 1024)} МБ.')
             book = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
             sheet = book.active
             iterator = sheet.iter_rows(values_only=True)
@@ -30,7 +31,7 @@ def read_table(upload):
                 if any(isinstance(v, str) and v.startswith('=') for v in values):
                     raise ImportProblem('Формулы в Excel не поддерживаются; вставьте значения.')
                 rows.append(dict(zip(header, values)))
-                if len(rows) > 5000: raise ImportProblem('Не более 5000 строк за импорт.')
+                if len(rows) > max_rows: raise ImportProblem(f'Не более {max_rows} строк.')
             book.close()
         except ImportProblem: raise
         except Exception as e: raise ImportProblem('Не удалось прочитать Excel.') from e
@@ -43,7 +44,7 @@ def read_table(upload):
             rows = []
             for row in reader:
                 rows.append(row)
-                if len(rows) > 5000: raise ImportProblem('Не более 5000 строк за импорт.')
+                if len(rows) > max_rows: raise ImportProblem(f'Не более {max_rows} строк.')
         except (UnicodeError, csv.Error, IndexError) as e:
             raise ImportProblem('Нужен CSV в UTF-8 с заголовком.') from e
     else:
@@ -69,12 +70,17 @@ def import_mapping(company, upload, actor):
         if not account: raise ImportProblem(f'Строка {line}: кабинет не принадлежит выбранной компании.')
         platform = {'wildberries': 'wb', 'wb': 'wb', 'ym': 'ym', 'яндекс маркет': 'ym'}.get(row['Platform'].lower())
         if platform != account.platform: raise ImportProblem(f'Строка {line}: площадка не совпадает с кабинетом.')
+        if platform == 'wb':
+            nm_id = wb_nm_id(row['SKU'])
+            if not nm_id or nm_id != wb_nm_id(row['External Product ID']):
+                raise ImportProblem(f'Строка {line}: для WB укажите одинаковый числовой артикул WB (nmId) в SKU и External Product ID. Артикул продавца не подходит.')
+            row['SKU'] = row['External Product ID'] = nm_id
         if row['Legal Entity'] != company.legal_entity:
             raise ImportProblem(f'Строка {line}: юридическое лицо не совпадает.')
         key = (account.pk, row['SKU'])
         if key in seen: raise ImportProblem(f'Строка {line}: повтор кабинета и SKU.')
         seen.add(key)
-        if any(len(row[k]) > n for k, n in [('ProductID', 100), ('Product Name', 200), ('Brand', 100), ('Volume', 40), ('Concentration', 40), ('SKU', 120), ('External Product ID', 120)]):
+        if any(len(row[k]) > n for k, n in [('ProductID', 100), ('Product Name', 200), ('Brand', 100), ('Volume', 240), ('Concentration', 40), ('SKU', 120), ('External Product ID', 120)]):
             raise ImportProblem(f'Строка {line}: слишком длинное значение.')
         values = {k: row[v] for k, v in [('name', 'Product Name'), ('brand', 'Brand'), ('volume', 'Volume'), ('concentration', 'Concentration')]}
         same_physical = Product.objects.filter(code=row['ProductID']).first()
@@ -99,7 +105,12 @@ def import_sales(company, upload, actor):
     for line, row in enumerate(rows, 2):
         required(row, ['Account', 'SKU', 'Date', 'Redemptions'], line)
         account = Account.objects.filter(company=company, name=row['Account']).first()
-        if not account or not ProductMapping.objects.filter(account=account, sku=row['SKU']).exists():
+        if account and account.platform == 'wb':
+            row['SKU'] = wb_nm_id(row['SKU'])
+        mappings = ProductMapping.objects.filter(account=account, sku=row['SKU'])
+        if account and account.platform == 'wb':
+            mappings = mappings.filter(external_product_id=row['SKU']).exclude(sku='')
+        if not account or not mappings.exists():
             raise ImportProblem(f'Строка {line}: неизвестный кабинет / unmapped SKU.')
         try:
             day = date.fromisoformat(row['Date'][:10])

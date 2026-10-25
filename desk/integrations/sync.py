@@ -10,10 +10,19 @@ from .base import IntegrationError, get_adapter
 
 @transaction.atomic
 def ingest(account, incoming):
-    mapping = ProductMapping.objects.filter(account=account, sku=incoming.sku).first()
+    mappings = ProductMapping.objects.filter(account=account, sku=incoming.sku)
+    if account.platform == 'wb' and not account.company.is_demo:
+        # Unresolved legacy seller SKUs must never match a coincidentally equal nmId.
+        mappings = mappings.filter(external_product_id=incoming.sku).exclude(sku='')
+    mapping = mappings.first()
     received = incoming.created_at or timezone.now()
     thread, created = Thread.objects.get_or_create(account=account, kind=incoming.kind, external_id=incoming.external_id, defaults={'text': incoming.text, 'sku': incoming.sku, 'customer': incoming.customer[:120], 'rating': incoming.rating, 'received_at': received, 'due_at': received + timedelta(minutes=account.company.sla_minutes), 'product': mapping.product if mapping else None})
     changed = thread.text != incoming.text or thread.rating != incoming.rating
+    identity_changed = bool(incoming.sku) and thread.sku != incoming.sku
+    if identity_changed or (mapping and thread.product_id is None):
+        thread.sku = incoming.sku
+        thread.product = mapping.product if mapping else None
+        thread.save(update_fields=['sku', 'product'])
     if changed:
         thread.text, thread.rating = incoming.text, incoming.rating
         if thread.status == 'Закрыто':
