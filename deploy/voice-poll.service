@@ -6,7 +6,7 @@ Wants=postgresql.service
 [Service]
 Type=simple
 User=voice
-Group=voice
+Group=voice-app
 WorkingDirectory=/opt/voice
 EnvironmentFile=/etc/voice/voice.env
 Environment=PYTHONUNBUFFERED=1

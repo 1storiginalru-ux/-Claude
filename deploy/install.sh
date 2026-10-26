@@ -28,14 +28,8 @@ for service in voice-web voice-worker voice-poll; do
   fi
 done
 
-if ! id voice >/dev/null 2>&1; then
-  useradd --system --user-group --home-dir /var/lib/voice --shell /usr/sbin/nologin voice
-fi
-if [ "$(id -u voice)" -eq 0 ]; then
-  echo 'Пользователь voice не должен иметь UID 0.' >&2
-  exit 1
-fi
-install -d -o voice -g voice -m 0700 /var/lib/voice
+bash deploy/create-service-user.sh
+install -d -o voice -g voice-app -m 0700 /var/lib/voice
 install -d -o root -g root -m 0700 /etc/voice
 python3 - <<'PY'
 from pathlib import Path

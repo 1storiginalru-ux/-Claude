@@ -1,10 +1,15 @@
 # Отдельный сервер Ubuntu 24.04
 
 Для начала: 2 vCPU, 4 ГБ RAM, 40–60 ГБ SSD/NVMe. Приложение работает
-под пользователем `voice`, PostgreSQL использует локальный Unix-сокет и peer
+под пользователем `voice` с отдельной группой `voice-app`, PostgreSQL использует локальный Unix-сокет и peer
 аутентификацию этого пользователя. Пароль PostgreSQL в этой схеме не нужен.
 Роль `voice` не получает права суперпользователя, создания ролей или баз.
 Локальный запуск на Mac и SQLite сохраняются без изменений.
+
+В Ubuntu/Debian группа `voice` уже может существовать как системная группа
+голосовой почты. Установщик сохраняет её и использует отдельную `voice-app`.
+Если пользователь `voice` уже создан предыдущей версией, его UID и членство
+в группах не изменяются; службы явно запускаются с группой `voice-app`.
 
 ## Подготовка сервера
 
@@ -89,7 +94,7 @@ SSH, хранение вне Git. Если файл экспорта уже су
 
 ```bash
 systemctl stop voice-web voice-worker voice-poll
-install -o voice -g voice -m 0600 /root/voice-transfer.json /var/lib/voice/voice-transfer.json
+install -o voice -g voice-app -m 0600 /root/voice-transfer.json /var/lib/voice/voice-transfer.json
 voice-manage import_transfer /var/lib/voice/voice-transfer.json
 voice-manage check
 systemctl start voice-web
