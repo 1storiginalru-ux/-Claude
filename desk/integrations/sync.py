@@ -110,6 +110,10 @@ def sync_account(account):
             count += 1
             ensure_analysis(thread, changed)
             heartbeat()
+        completed_window = getattr(adapter, 'completed_window', None)
+        if isinstance(completed_window, tuple) and len(completed_window) == 2:
+            from .coverage import record_coverage
+            record_coverage(state, *completed_window)
         from .details import enrich_account
         enriched = enrich_account(account, adapter, heartbeat=heartbeat, on_change=ensure_analysis)
         detail = f'Получено: {count}; дополнено: {enriched}; ошибок AI: {analysis_errors}'

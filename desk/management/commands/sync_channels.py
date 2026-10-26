@@ -29,6 +29,11 @@ class Command(BaseCommand):
                     for account in accounts:
                         try: self.stdout.write(f'{account.name}: {sync_account(account)} объектов')
                         except IntegrationError as e: self.stderr.write(f'{account.name}: {e}')
+                    from desk.integrations.wb_sales import sync_wb_sales
+                    sales_accounts = list(Account.objects.filter(enabled=True, sales_enabled=True, platform='wb', company__is_demo=False).filter(Q(sales_state__isnull=True) | Q(sales_state__next_attempt__lte=timezone.now())).select_related('company'))
+                    for account in sales_accounts:
+                        try: self.stdout.write(f'{account.name}, продажи WB: {sync_wb_sales(account)} событий')
+                        except IntegrationError as e: self.stderr.write(f'{account.name}, продажи WB: {e}')
                 except OperationalError as error:
                     if not is_database_busy(error): raise
                     self.stderr.write('База временно занята. Синхронизация продолжится в следующем цикле с сохранённой страницы.')

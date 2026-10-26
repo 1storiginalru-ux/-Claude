@@ -72,7 +72,7 @@ class Adapter:
         try: payload = response.json() if response.content else {}
         except ValueError as e:
             raise IntegrationError('API вернул некорректный JSON.', ambiguous=writing) from e
-        if payload.get('error') or payload.get('status') == 'ERROR':
+        if isinstance(payload, dict) and (payload.get('error') or payload.get('status') == 'ERROR'):
             raise IntegrationError('API сообщил об ошибке. Проверьте права и параметры кабинета.')
         return payload
 

@@ -54,6 +54,8 @@ class Account(models.Model):
     token_env = models.CharField('Имя переменной с API-ключом', max_length=100, validators=[RegexValidator(r'^[A-Z][A-Z0-9_]*$')])
     business_id = models.CharField('Business ID (Яндекс)', max_length=40, blank=True, validators=[RegexValidator(r'^\d*$')])
     enabled = models.BooleanField(default=False)
+    sales_enabled = models.BooleanField('Получать продажи WB через API', default=False)
+    sales_token_env = models.CharField('Переменная отдельного ключа статистики WB', max_length=100, blank=True, validators=[RegexValidator(r'^[A-Z][A-Z0-9_]*$')], help_text='Пусто — использовать ключ кабинета. Для продаж нужны права «Статистика».')
     last_sync = models.DateTimeField(null=True, blank=True)
     sync_status = models.CharField(max_length=240, default='Ещё не запускалась')
 
@@ -63,13 +65,15 @@ class Account(models.Model):
         from django.core.exceptions import ValidationError
         if self.company_id and self.company.is_demo and self.enabled:
             raise ValidationError('Для демо-компании внешние интеграции включать нельзя. Создайте реальную компанию.')
+        if self.sales_enabled and (self.platform != 'wb' or not self.company_id or self.company.is_demo):
+            raise ValidationError('Автоматические продажи пока доступны только для реального кабинета WB.')
         if self.pk and Account.objects.filter(pk=self.pk).exclude(company_id=self.company_id).exists() and (self.thread_set.exists() or self.productmapping_set.exists()):
             raise ValidationError('Нельзя менять компанию кабинета с историей или Mapping.')
 
 
 class Product(models.Model):
     company = models.ForeignKey(Company, on_delete=models.PROTECT)
-    code = models.CharField('ProductID', max_length=100)
+    code = models.CharField('ProductID', max_length=100, db_index=True)
     name = models.CharField(max_length=200)
     brand = models.CharField(max_length=100, blank=True)
     volume = models.CharField(max_length=240, blank=True)
@@ -122,6 +126,34 @@ class SalesDaily(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['account', 'sku', 'date'], name='daily_sales_unique')]
+
+
+class SaleEvent(models.Model):
+    account = models.ForeignKey(Account, on_delete=models.PROTECT)
+    external_id = models.CharField(max_length=160)
+    sku = models.CharField(max_length=120)
+    kind = models.CharField(max_length=10, choices=[('sale', 'Выкуп'), ('return', 'Возврат')])
+    occurred_at = models.DateTimeField(db_index=True)
+    changed_at = models.DateTimeField()
+    order_id = models.CharField(max_length=160, blank=True)
+    source_data = models.JSONField(default=dict)
+    synced_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['account', 'external_id'], name='sale_event_unique')]
+        indexes = [models.Index(fields=['account', 'sku', 'kind', '-occurred_at'], name='sale_product_window')]
+
+
+class SalesSyncState(models.Model):
+    account = models.OneToOneField(Account, on_delete=models.CASCADE, related_name='sales_state')
+    cursor = models.JSONField(default=dict)
+    next_attempt = models.DateTimeField(default=timezone.now)
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    coverage_since = models.DateTimeField(null=True, blank=True)
+    coverage_until = models.DateTimeField(null=True, blank=True)
+    last_sync = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=240, blank=True)
 
 
 class Thread(models.Model):
@@ -186,6 +218,11 @@ class Analysis(models.Model):
     prompt_version = models.CharField(max_length=30, default='1.0')
     created_at = models.DateTimeField(auto_now=True)
 
+    @property
+    def grouped_signals(self):
+        from .voc.rules import grouped_signals, signal_label
+        return [signal_label(signal) for signal in grouped_signals(self.signals)]
+
 
 class Baseline(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
@@ -247,6 +284,11 @@ class Incident(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    @property
+    def display_signal(self):
+        from .voc.rules import grouped_signals, signal_label
+        return signal_label(grouped_signals([self.signal])[0])
+
     class Meta:
         constraints = [models.UniqueConstraint(fields=['product', 'signal'], condition=~Q(status='CLOSED'), name='open_incident_unique')]
 
@@ -282,3 +324,5 @@ class SyncState(models.Model):
     next_attempt = models.DateTimeField(default=timezone.now)
     lease_token = models.UUIDField(null=True, blank=True)
     lease_until = models.DateTimeField(null=True, blank=True)
+    coverage_since = models.DateTimeField(null=True, blank=True)
+    coverage_until = models.DateTimeField(null=True, blank=True)

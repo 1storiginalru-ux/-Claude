@@ -51,6 +51,7 @@ class YandexMarket(Adapter):
         for row in self.pages('goods-questions', 'questions', question_filter, 1):
             if within_window(row.get('createdAt'), max(since, sync_window()[0]), until):
                 yield self.parse(row, 'question')
+        self.completed_window = (max(since, sync_window()[0]), until)
 
     def fetch_one(self, thread):
         if thread.kind == 'review':

@@ -2,14 +2,15 @@ import uuid
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Q, Sum, Max, Min
+from django.core.paginator import Paginator
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 from django.http import JsonResponse
 from .access import OPERATORS, QUALITY, companies_for, require_role
-from .models import Account, Audit, Company, Incident, Membership, Outgoing, Product, ProductMapping, SalesDaily, SyncLog, Thread
-from .voc.rules import SIGNALS, evaluate, human_only, product_family
+from .models import Account, Audit, Company, Incident, Membership, Outgoing, Product, ProductMapping, SaleEvent, SalesDaily, SyncLog, Thread
+from .voc.rules import SIGNALS, PRODUCT_SIGNALS, evaluate, human_only, product_family, grouped_signals, matches, signal_label, review_summary
 from .integrations.base import IntegrationError
 
 
@@ -41,12 +42,12 @@ def inbox(request):
     if request.GET.get('unmapped'): threads = threads.filter(product__isnull=True)
     if request.GET.get('overdue'): threads = threads.filter(due_at__lt=timezone.now()).exclude(status__in=['Закрыто', 'Ответ отправлен', 'Ожидаем клиента'])
     signal = request.GET.get('signal')
-    if signal in SIGNALS:
-        ids = [t.pk for t in threads if hasattr(t, 'analysis') and signal in t.analysis.signals]
+    if signal in SIGNALS or signal == 'LONG_AUTH':
+        ids = [t.pk for t in threads if hasattr(t, 'analysis') and matches(t.analysis.signals, signal)]
         threads = threads.filter(pk__in=ids)
     from django.core.paginator import Paginator
     page = Paginator(threads, 30).get_page(request.GET.get('page'))
-    return render(request, 'desk/inbox.html', context(request, page=page, statuses=Thread.STATUSES, signals=sorted(SIGNALS), accounts=Account.objects.filter(company__in=companies_for(request.user)), total=base.count(), fresh=base.filter(status='Новое').count(), overdue=base.filter(due_at__lt=timezone.now()).exclude(status__in=['Закрыто', 'Ответ отправлен', 'Ожидаем клиента']).count(), failed=base.filter(status='Ошибка отправки').count()))
+    return render(request, 'desk/inbox.html', context(request, page=page, statuses=Thread.STATUSES, signals=[{'code': s, 'label': signal_label(s)} for s in grouped_signals(SIGNALS)], accounts=Account.objects.filter(company__in=companies_for(request.user)), total=base.count(), fresh=base.filter(status='Новое').count(), overdue=base.filter(due_at__lt=timezone.now()).exclude(status__in=['Закрыто', 'Ответ отправлен', 'Ожидаем клиента']).count(), failed=base.filter(status='Ошибка отправки').count()))
 
 
 @login_required
@@ -55,7 +56,7 @@ def thread_detail(request, pk):
     from .integrations.window import within_window
     thread = get_object_or_404(scoped_threads(request.user), pk=pk)
     analysis = getattr(thread, 'analysis', None)
-    metrics = [evaluate(thread.product, s, scope=companies_for(request.user)) for s in analysis.signals] if thread.product_id and analysis else []
+    metrics = [evaluate(thread.product, s, scope=companies_for(request.user)) for s in grouped_signals(analysis.signals)] if thread.product_id and analysis else []
     can_reply = request.user.is_superuser or Membership.objects.filter(user=request.user, company=thread.account.company, role__in=OPERATORS).exists()
     return render(request, 'desk/thread.html', context(request, thread=thread, source_content=content_view(thread), within_sync_window=within_window(thread.received_at), analysis=analysis, metrics=metrics, request_key=str(uuid.uuid4()), can_reply=can_reply, human_only=human_only({'signals': analysis.signals, 'severity': analysis.severity}) if analysis else False, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()))
 
@@ -101,7 +102,7 @@ def thread_action(request, pk):
             messages.success(request, 'Сверка выполнена. Проверьте обновлённый статус ответа.')
         elif action == 'escalate':
             from .incidents.service import escalate
-            signal = thread.analysis.signals[0] if hasattr(thread, 'analysis') and thread.analysis.signals else 'OTHER'
+            signal = grouped_signals(thread.analysis.signals)[0] if hasattr(thread, 'analysis') and thread.analysis.signals else 'OTHER'
             incident = escalate(thread, signal, request.user)
             messages.success(request, f'Обращение связано с расследованием #{incident.pk}.')
         elif action == 'status':
@@ -127,35 +128,57 @@ def thread_action(request, pk):
 def products(request):
     items = Product.objects.filter(company__in=companies_for(request.user)).select_related('company').annotate(mapping_count=Count('mappings'))
     if request.GET.get('q'): items = items.filter(Q(code__icontains=request.GET['q']) | Q(name__icontains=request.GET['q']))
-    return render(request, 'desk/products.html', context(request, products=items))
+    page = Paginator(items.order_by('code', 'pk'), 48).get_page(request.GET.get('page'))
+    return render(request, 'desk/products.html', context(request, products=page, product_page=page))
 
 
 @login_required
 def product_detail(request, pk):
     product = get_object_or_404(Product, pk=pk, company__in=companies_for(request.user))
     window = request.GET.get('window', '100')
-    if window not in {'20', '50', '100', '200', '30d', '60d', '90d'}: window = '100'
-    metrics = [evaluate(product, s, window, scope=companies_for(request.user)) for s in ['AUTH', 'LONG', 'SCENT', 'PACK', 'DEFECT', 'MARK', 'RETURN']]
+    if window not in {'20', '50', '100', '200', '7d', '30d', '60d', '90d'}: window = '100'
     sales = []
     family = product_family(product, companies_for(request.user))
-    for mapping in ProductMapping.objects.filter(product__in=family).select_related('account'):
-        totals = SalesDaily.objects.filter(account=mapping.account, sku=mapping.sku).aggregate(redemptions=Sum('redemptions'), returns=Sum('returns'), orders=Sum('orders'))
-        sales.append({'mapping': mapping, **totals})
-    return render(request, 'desk/product.html', context(request, product=product, metrics=metrics, sales=sales, window=window, threads=scoped_threads(request.user).filter(product__in=family)[:30]))
+    product_accounts = Account.objects.filter(productmapping__product__in=family).distinct()
+    selected_account = request.GET.get('account', '')
+    account_id = int(selected_account) if selected_account.isdigit() and product_accounts.filter(pk=int(selected_account)).exists() else None
+    metrics = [evaluate(product, s, window, scope=companies_for(request.user), account_id=account_id) for s in PRODUCT_SIGNALS]
+    summary = review_summary(product, window, scope=companies_for(request.user), account_id=account_id)
+    mappings = ProductMapping.objects.filter(product__in=family).select_related('account')
+    if account_id is not None: mappings = mappings.filter(account_id=account_id)
+    event_filter = Q(pk__in=[])
+    for mapping in mappings:
+        if mapping.account.platform == 'wb' and mapping.account.sales_enabled:
+            source = SaleEvent.objects.filter(account=mapping.account, sku=mapping.sku, occurred_at__lte=timezone.now())
+            totals = {'redemptions': source.filter(kind='sale').count(), 'returns': source.filter(kind='return').count(), 'orders': None}
+            source_label = 'API WB (оперативные данные)'
+        else:
+            totals = SalesDaily.objects.filter(account=mapping.account, sku=mapping.sku).aggregate(redemptions=Sum('redemptions'), returns=Sum('returns'), orders=Sum('orders'))
+            source_label = 'Импорт файла'
+        event_filter |= Q(account=mapping.account, sku=mapping.sku)
+        sales.append({'mapping': mapping, 'source_label': source_label, **totals})
+    recent_sales = SaleEvent.objects.filter(event_filter, kind='sale', occurred_at__lte=summary['period']['until']).select_related('account').order_by('-occurred_at', '-pk')[:100]
+    history = scoped_threads(request.user).filter(product__in=family)
+    if account_id is not None: history = history.filter(account_id=account_id)
+    return render(request, 'desk/product.html', context(request, product=product, metrics=metrics, sales=sales, window=window, threads=history[:30], summary=summary, product_accounts=product_accounts, selected_account=str(account_id or ''), recent_sales=recent_sales))
 
 
 @login_required
 def voc(request):
     rows = []
-    seen = set()
-    for product in Product.objects.filter(company__in=companies_for(request.user)):
-        if product.code in seen: continue
-        seen.add(product.code)
-        for signal in ['AUTH', 'LONG', 'DEFECT', 'PACK', 'MARK', 'RETURN']:
+    candidates = Product.objects.filter(company__in=companies_for(request.user), thread__analysis__isnull=False)
+    if request.GET.get('q'):
+        candidates = candidates.filter(Q(code__icontains=request.GET['q']) | Q(name__icontains=request.GET['q']))
+    families = candidates.values('code').annotate(product_id=Min('pk'), last_feedback=Max('thread__received_at')).order_by('-last_feedback', 'code')
+    product_page = Paginator(families, 20).get_page(request.GET.get('page'))
+    products = Product.objects.in_bulk([row['product_id'] for row in product_page])
+    for candidate in product_page:
+        product = products[candidate['product_id']]
+        for signal in PRODUCT_SIGNALS:
             metric = evaluate(product, signal, scope=companies_for(request.user))
             if metric['count'] or metric['status'] == 'ANOMALY': rows.append({'product': product, **metric})
     rows.sort(key=lambda x: ({'ANOMALY': 0, 'WATCH': 1, 'NORMAL': 2}[x['status']], -x['count']))
-    return render(request, 'desk/voc.html', context(request, metrics=rows, incidents=visible_incidents(request.user).exclude(status='CLOSED').select_related('product')))
+    return render(request, 'desk/voc.html', context(request, metrics=rows, product_page=product_page, incidents=visible_incidents(request.user).exclude(status='CLOSED').select_related('product')))
 
 
 @login_required
@@ -180,10 +203,10 @@ def integrations(request):
     from .integrations.window import sync_window
     since, until = sync_window()
     recent = Q(thread__received_at__gte=since, thread__received_at__lte=until)
-    accounts = Account.objects.filter(company__in=companies_for(request.user)).select_related('company', 'sync_state').annotate(total_threads=Count('thread'), sync_threads=Count('thread', filter=recent), full_threads=Count('thread', filter=recent & Q(thread__source_synced_at__isnull=False)), history_threads=Count('thread', filter=recent & Q(thread__history_synced_at__isnull=False)))
+    accounts = Account.objects.filter(company__in=companies_for(request.user)).select_related('company', 'sync_state', 'sales_state').annotate(total_threads=Count('thread'), sync_threads=Count('thread', filter=recent), full_threads=Count('thread', filter=recent & Q(thread__source_synced_at__isnull=False)), history_threads=Count('thread', filter=recent & Q(thread__history_synced_at__isnull=False)))
     import os
     from .integrations.base import get_adapter
-    rows = [{'account': a, 'has_key': bool(os.environ.get(a.token_env)), 'capabilities': get_adapter(a).capabilities, 'next_attempt': a.sync_state.next_attempt if hasattr(a, 'sync_state') else None, 'paused': hasattr(a, 'sync_state') and a.sync_state.next_attempt > timezone.now() and 'Пауза ' in a.sync_status} for a in accounts]
+    rows = [{'account': a, 'has_key': bool(os.environ.get(a.token_env)), 'sales_has_key': bool(os.environ.get(a.sales_token_env or a.token_env)), 'capabilities': get_adapter(a).capabilities, 'next_attempt': a.sync_state.next_attempt if hasattr(a, 'sync_state') else None, 'paused': hasattr(a, 'sync_state') and a.sync_state.next_attempt > timezone.now() and 'Пауза ' in a.sync_status} for a in accounts]
     return render(request, 'desk/integrations.html', context(request, rows=rows, logs=SyncLog.objects.filter(account__in=accounts).select_related('account').order_by('-created_at')[:20]))
 
 

@@ -35,13 +35,13 @@ def retry_delay(headers, *, now=None, fallback=60):
     return math.ceil(max(waits)) + 1 if waits else fallback
 
 
-def scope_for(token):
-    return hashlib.sha256(('wb-feedbacks\0' + token).encode()).hexdigest()
+def scope_for(token, namespace='wb-feedbacks'):
+    return hashlib.sha256((namespace + '\0' + token).encode()).hexdigest()
 
 
-def acquire(token):
+def acquire(token, namespace='wb-feedbacks', interval=1):
     from .base import IntegrationError
-    scope = scope_for(token)
+    scope = scope_for(token, namespace)
     for _ in range(10):
         state, _ = ApiThrottle.objects.get_or_create(scope=scope)
         now = timezone.now()
@@ -55,22 +55,22 @@ def acquire(token):
             time.sleep(wait)
             continue
         # Compare-and-swap also works with SQLite, whose select_for_update is a no-op.
-        if ApiThrottle.objects.filter(pk=state.pk, next_request_at=state.next_request_at).update(next_request_at=now + timedelta(seconds=1)):
+        if ApiThrottle.objects.filter(pk=state.pk, next_request_at=state.next_request_at).update(next_request_at=now + timedelta(seconds=interval)):
             return
     raise IntegrationError('Канал WB занят другим запросом; следующая попытка отложена.', retryable=True, retry_after=2, rate_limited=True, request_sent=False)
 
 
-def observe(token, response):
-    state, _ = ApiThrottle.objects.get_or_create(scope=scope_for(token))
+def observe(token, response, namespace='wb-feedbacks', fallback=60, maximum=3600):
+    state, _ = ApiThrottle.objects.get_or_create(scope=scope_for(token, namespace))
     now = timezone.now()
     if response.status_code in {420, 429}:
-        wait = retry_delay(response.headers, now=now, fallback=min(3600, 60 * 2 ** min(state.strikes, 6)))
+        wait = retry_delay(response.headers, now=now, fallback=min(maximum, fallback * 2 ** min(state.strikes, 6)))
         ApiThrottle.objects.filter(pk=state.pk).update(strikes=F('strikes') + 1)
     elif 200 <= response.status_code < 300:
         ApiThrottle.objects.filter(pk=state.pk).update(strikes=0)
         if seconds(response.headers.get('X-Ratelimit-Remaining')) != 0:
             return None
-        wait = retry_delay(response.headers, now=now)
+        wait = retry_delay(response.headers, now=now, fallback=fallback)
     else:
         return None
     until = now + timedelta(seconds=wait)

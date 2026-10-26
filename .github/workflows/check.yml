@@ -65,3 +65,5 @@ jobs:
           desk.tests.test_rules desk.tests.test_server_setup
           desk.tests.test_start_port desk.tests.test_sync_window
           desk.tests.test_web desk.tests.test_wb_identifiers
+          desk.tests.test_wb_sales desk.tests.test_product_metrics
+          desk.tests.test_coverage

@@ -11,7 +11,7 @@ class HistoricalBaselineTests(DeskCase):
         self.analysis()
         old = self.make_thread('historical', received_at=timezone.now() - timedelta(days=20))
         self.analysis(old)
-        self.assertEqual(refresh_baselines(self.product), 7)
+        self.assertEqual(refresh_baselines(self.product), 8)
         baseline = Baseline.objects.get(product=self.product, signal='LONG')
         self.assertEqual(baseline.sample_redemptions, 100)
         self.assertAlmostEqual(baseline.high, 2.96)

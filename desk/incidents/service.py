@@ -4,7 +4,7 @@ import requests
 from django.db import transaction
 from desk.models import Audit, Incident
 from desk.voc.rules import evaluate
-from desk.voc.rules import product_family
+from desk.voc.rules import product_family, grouped_signals
 
 
 @transaction.atomic
@@ -26,7 +26,7 @@ def escalate(thread, signal, actor=None):
 def evaluate_incidents(thread, actor=None):
     if not thread.product_id: return
     analysis = thread.analysis
-    for signal in analysis.signals:
+    for signal in grouped_signals(analysis.signals):
         stats = evaluate(thread.product, signal)
         if stats['status'] == 'ANOMALY' or (analysis.objective_issue and analysis.severity in {'P0', 'P1'}):
             escalate(thread, signal, actor)

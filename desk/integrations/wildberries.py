@@ -1,4 +1,5 @@
 import math
+from datetime import datetime, timezone as datetime_timezone
 from .base import Adapter, Incoming, IntegrationError, timestamp
 from .window import LOOKBACK_DAYS, sync_window, within_window
 from desk.products.identifiers import wb_nm_id
@@ -64,6 +65,7 @@ class Wildberries(Adapter):
                 cursor['skip'] += len(rows)
             self.checkpoint(dict(cursor))
         self.checkpoint({'watermark': cursor['until'], 'lookback_days': LOOKBACK_DAYS})
+        self.completed_window = (datetime.fromtimestamp(cursor['since'], datetime_timezone.utc), datetime.fromtimestamp(cursor['until'], datetime_timezone.utc))
 
     def send(self, thread, text):
         if thread.kind == 'review':
