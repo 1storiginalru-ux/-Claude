@@ -1,0 +1,25 @@
+[Unit]
+Description=Voice web application
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=voice
+Group=voice
+WorkingDirectory=/opt/voice
+EnvironmentFile=/etc/voice/voice.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/voice/.venv/bin/gunicorn --config /opt/voice/deploy/gunicorn.conf.py config.wsgi:application
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=70
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/voice
+
+[Install]
+WantedBy=multi-user.target

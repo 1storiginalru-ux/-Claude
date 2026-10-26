@@ -1,0 +1,36 @@
+#!/usr/bin/python3
+"""Store a single-line API key without shell history or terminal echo."""
+import getpass
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+
+
+if os.geteuid() != 0:
+    sys.exit('Запустите через sudo: sudo voice-set-key VOC_WB_TOKEN')
+if len(sys.argv) != 2 or not re.fullmatch(r'VOC_[A-Z][A-Z0-9_]*', sys.argv[1]):
+    sys.exit('Укажите имя переменной ключа, например voice-set-key VOC_WB_TOKEN.')
+key = sys.argv[1]
+value = getpass.getpass(f'Введите {key} (символы не отображаются): ')
+if not value or len(value) > 16000 or any(not char.isprintable() for char in value):
+    sys.exit('Ключ должен быть непустой строкой без управляющих символов. Настройки не изменены.')
+path = Path('/etc/voice/voice.env')
+lines = [line for line in path.read_text().splitlines() if line.partition('=')[0].strip() != key]
+# JSON quotes are a subset of systemd EnvironmentFile quoting for these
+# printable, single-line values; no shell interpolation is performed.
+lines.append(key + '=' + json.dumps(value, ensure_ascii=False))
+temporary = None
+try:
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, prefix='.voice-env-', delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write('\n'.join(lines) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+finally:
+    if temporary:
+        temporary.unlink(missing_ok=True)
+print('Ключ сохранён. Уже работающие службы прочитают его при следующем перезапуске.')

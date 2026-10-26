@@ -21,3 +21,46 @@ jobs:
       - run: .venv/bin/python manage.py check
       - run: .venv/bin/python manage.py makemigrations --check --dry-run
       - run: .venv/bin/python manage.py test desk.tests
+  server:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: voice_ci
+          POSTGRES_USER: voice_ci
+          POSTGRES_PASSWORD: ci-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U voice_ci -d voice_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DJANGO_SETTINGS_MODULE: config.production
+      DJANGO_SECRET_KEY: ci-test-secret-only-for-automated-tests-more-than-fifty-characters
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,testserver
+      VOC_HTTPS: '0'
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGDATABASE: voice_ci
+      PGUSER: voice_ci
+      PGPASSWORD: ci-test-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements-server.txt
+      - run: python manage.py collectstatic --noinput
+      - run: python manage.py check
+      - run: >-
+          python manage.py test
+          desk.tests.test_ai_integrations desk.tests.test_baselines
+          desk.tests.test_diagnose_wb desk.tests.test_documents_bitrix
+          desk.tests.test_full_content desk.tests.test_imports
+          desk.tests.test_messaging desk.tests.test_prepare_local
+          desk.tests.test_prepare_mapping desk.tests.test_rate_limits
+          desk.tests.test_rules desk.tests.test_server_setup
+          desk.tests.test_start_port desk.tests.test_sync_window
+          desk.tests.test_web desk.tests.test_wb_identifiers

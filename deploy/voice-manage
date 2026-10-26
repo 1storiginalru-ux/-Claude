@@ -1,0 +1,19 @@
+#!/usr/bin/python3
+"""Run a management command with server settings as the unprivileged user."""
+import os
+import sys
+
+sys.path.insert(0, '/opt/voice/deploy')
+from environment import read_environment
+
+
+if os.geteuid() != 0:
+    sys.exit('Запустите через sudo: sudo voice-manage ...')
+try:
+    environment = os.environ.copy()
+    environment.update(read_environment('/etc/voice/voice.env'))
+except (OSError, ValueError) as error:
+    sys.exit(str(error))
+environment['PYTHONUNBUFFERED'] = '1'
+os.chdir('/opt/voice')
+os.execvpe('runuser', ['runuser', '-u', 'voice', '--', '/opt/voice/.venv/bin/python', '/opt/voice/manage.py', *sys.argv[1:]], environment)

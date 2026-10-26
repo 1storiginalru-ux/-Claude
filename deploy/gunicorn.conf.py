@@ -1,0 +1,10 @@
+bind = '127.0.0.1:8000'
+workers = 2
+threads = 2
+timeout = 180
+graceful_timeout = 60
+max_requests = 1000
+max_requests_jitter = 50
+accesslog = '-'
+errorlog = '-'
+forwarded_allow_ips = '127.0.0.1'
