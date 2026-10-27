@@ -29,7 +29,7 @@ def scoped_threads(user):
 
 
 def context(request, **kwargs):
-    return {'companies': companies_for(request.user), 'has_demo': companies_for(request.user).filter(is_demo=True).exists(), 'now': timezone.now(), **kwargs}
+    return {'companies': companies_for(request.user), 'has_demo': companies_for(request.user).filter(is_demo=True, account__thread__isnull=False).exists(), 'now': timezone.now(), **kwargs}
 
 
 @login_required
