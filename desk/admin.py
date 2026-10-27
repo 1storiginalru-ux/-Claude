@@ -1,4 +1,5 @@
 from django.contrib import admin
+from .models import YandexOrderState
 from django.forms.models import model_to_dict
 from .models import Account, Analysis, Audit, Baseline, Company, HistorySyncState, Incident, Membership, Message, Outgoing, Product, ProductMapping, ReviewAssessment, SaleEvent, SalesSyncState, SalesDaily, SyncLog, Team, Thread
 
@@ -60,6 +61,7 @@ class SaleEventAdmin(ReadOnlyAdmin):
 
 admin.site.register(SalesSyncState, ReadOnlyAdmin)
 admin.site.register(HistorySyncState, ReadOnlyAdmin)
+admin.site.register(YandexOrderState, ReadOnlyAdmin)
 admin.site.register(ReviewAssessment, ReadOnlyAdmin)
 
 

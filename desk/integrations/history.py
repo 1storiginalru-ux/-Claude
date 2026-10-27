@@ -23,7 +23,7 @@ MAX_SKIP = 200000
 
 def eligible(account, kind):
     return (account.enabled and not account.company.is_demo and account.history_enabled
-            and (kind == 'reviews' or (account.platform == 'wb' and account.sales_enabled))
+            and (kind == 'reviews' or (account.platform in {'wb','ym'} and account.sales_enabled))
             and ProductMapping.objects.filter(account=account).exists())
 
 
@@ -44,7 +44,10 @@ def history_need(account, kind, state, now):
         if not recent or not recent.coverage_until:
             return None, 'Сначала ожидаем завершения текущей загрузки продаж.'
         needs = any(p['redemptions'] < TARGET or not p['start_at'] or not recent.coverage_since or recent.coverage_since > p['start_at'] for p in periods)
-        if not needs: return None, 'Последние 100 выкупов доступны по всем сопоставленным товарам.'
+        if not needs:
+            if any(p.get('window_ambiguous') for p in periods):
+                return None,'100 подтверждённых выкупов загружены; есть позиции Маркета с неизвестной датой или количеством. Проверьте карточку товара.'
+            return None, 'Последние 100 выкупов доступны по всем сопоставленным товарам.'
         if state.days >= MAX_DAYS:
             # A genuine outage can leave a gap between saved history and current polling.
             if recent.coverage_since and state.coverage_until and recent.coverage_since > state.coverage_until:
@@ -60,7 +63,7 @@ def history_need(account, kind, state, now):
     if any(p['redemptions'] < TARGET for p in periods):
         starts.extend(s.coverage_since for s in data.sales_states.values() if s.coverage_since)
     if not starts:
-        if account.platform != 'wb' or not account.sales_enabled:
+        if account.platform not in {'wb','ym'} or not account.sales_enabled:
             return None, 'Нет периода продаж для исторической загрузки отзывов.'
         starts = [now-timedelta(days=7)]
     since = max(now-timedelta(days=MAX_DAYS), min(starts + [now-timedelta(days=7)]))
@@ -209,6 +212,13 @@ def reviews_page(account, state, cursor):
 
 
 def sales_history_page(account,state,cursor):
+    if account.platform=='ym':
+        from .ym_sales import load_page
+        count,next_cursor,complete=load_page(account,state,cursor)
+        if complete: finish(account,state,cursor,source_time(cursor['until']))
+        else:
+            HistorySyncState.objects.filter(pk=state.pk,lease_token=state.lease_token).update(cursor=next_cursor,next_attempt=timezone.now()+timedelta(seconds=61),status=f'История продаж Маркета {cursor["days"]} дней: обработано {count}; обход продолжается.')
+        return count
     since=source_time(cursor['since'])
     page_from=source_time(cursor.get('page_from',cursor['since']))
     rows=WBSales(account).request('GET','/api/v1/supplier/sales',params={'dateFrom':cursor.get('page_from',cursor['since']),'flag':0})
@@ -261,7 +271,7 @@ def sync_history(account,kind):
         delay=error.retry_after or (120 if error.retryable else 3600) if isinstance(error,IntegrationError) else 3600
         message=str(error) if isinstance(error,IntegrationError) else 'Неожиданный формат исторических данных; полнота не подтверждена.'
         if kind=='sales' and ('HTTP 401' in message or 'HTTP 403' in message):
-            message='Нет доступа к истории продаж WB. Проверьте ключ с правами «Статистика».'
+            message=('Нет доступа к истории продаж WB. Проверьте ключ с правами «Статистика».' if account.platform=='wb' else 'Нет доступа к истории продаж Маркета. Проверьте права чтения заказов и статистики.')
         HistorySyncState.objects.filter(pk=state.pk,lease_token=lease).update(next_attempt=timezone.now()+timedelta(seconds=delay),status=message[:240])
         if isinstance(error,IntegrationError): raise
         raise IntegrationError(message) from error

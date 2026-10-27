@@ -6,6 +6,7 @@ from desk.demo_data import PRODUCTS, EXAMPLES
 from desk.models import (Account, Analysis, Audit, Baseline, Company, HistorySyncState, Incident, Message,
                          Outgoing, Product, ProductMapping, ReviewAssessment, SaleEvent,
                          SalesDaily, SalesSyncState, SyncLog, SyncState, Thread)
+from desk.models import YandexOrderState
 
 
 class DemoCleanupProblem(ValueError):
@@ -42,6 +43,7 @@ def purge_demo(*, apply=False):
     codes = {row[0] for row in PRODUCTS}
     expected_threads = {f'demo-{index}': row[4] for index, row in enumerate(EXAMPLES)}
     reject(accounts.filter(Q(enabled=True) | Q(sales_enabled=True)).exists(), 'Демо-кабинет включён для внешней интеграции.')
+    reject(YandexOrderState.objects.filter(account_id__in=account_ids).exists(), 'В демо-кабинете есть рабочие данные заказов Маркета.')
     reject(products.exclude(code__in=codes).exists(), 'В демо-компании есть товары вне стандартного набора.')
     reject(Product.objects.filter(code__in=products.values_list('code', flat=True), company__is_demo=False).exists(), 'Демонстрационный ProductID используется рабочей компанией.')
     reject(any(row['external_id'] not in expected_threads or expected_threads[row['external_id']] != row['kind'] for row in thread_rows), 'В демо-кабинете есть обращения без стандартной демо-метки.')

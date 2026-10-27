@@ -126,6 +126,7 @@ def review_summary(product, window='100', now=None, scope=None, account_id=None,
         classified += 1
         negative += is_negative(analysis)
     reviews_complete = (bool(period['accounts']) and not period['feedback_reasons']
+                        and not period.get('window_ambiguous')
                         and (period['target'] is None or period['redemptions'] >= period['target'])
                         and classified == total)
     complete = period['complete'] and reviews_complete

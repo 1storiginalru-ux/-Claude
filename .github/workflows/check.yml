@@ -72,3 +72,4 @@ jobs:
           desk.tests.test_demo_cleanup
           desk.tests.test_history
           desk.tests.test_ozon
+          desk.tests.test_ym_sales

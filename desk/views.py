@@ -194,22 +194,26 @@ def product_detail(request, pk):
     if account_id is not None: mappings = mappings.filter(account_id=account_id)
     event_filter = Q(pk__in=[])
     for mapping in mappings:
-        if mapping.account.platform == 'wb' and mapping.account.sales_enabled:
+        if mapping.account.platform in {'wb','ym'} and mapping.account.sales_enabled:
             source = SaleEvent.objects.filter(account=mapping.account, sku=mapping.sku, occurred_at__lte=timezone.now())
             totals = {'redemptions': source.filter(kind='sale').count(), 'returns': source.filter(kind='return').count(), 'orders': None}
-            source_label = 'API WB (оперативные данные)'
+            source_label = 'API WB (оперативные данные)' if mapping.account.platform=='wb' else 'API Яндекс Маркета (заказы и статусы)'
         else:
             totals = SalesDaily.objects.filter(account=mapping.account, sku=mapping.sku).aggregate(redemptions=Sum('redemptions'), returns=Sum('returns'), orders=Sum('orders'))
             source_label = 'Импорт файла'
         event_filter |= Q(account=mapping.account, sku=mapping.sku)
         sales.append({'mapping': mapping, 'source_label': source_label, **totals})
     recent_sales = SaleEvent.objects.filter(event_filter, kind='sale', occurred_at__lte=summary['period']['until']).select_related('account').order_by('-occurred_at', '-pk')[:100]
+    from .voc.uncertainty import overlaps
+    account_names={a.pk:a.name for a in product_accounts}
+    market_issues=[{**issue,'account_name':account_names.get(issue['account_id'],'')} for issue in dataset.uncertainties[product.code]
+                   if (account_id is None or issue['account_id']==account_id) and overlaps(issue,summary['period']['start_at'],summary['period']['until'])]
     history = scoped_threads(request.user).filter(product__in=family)
     if account_id is not None: history = history.filter(account_id=account_id)
     baseline = dataset.baselines.get((product.code, 'NEGATIVE'))
     account_metrics = [{'name': account.name, **evaluate(product, 'NEGATIVE', window, dataset=dataset, account_id=account.pk)} for account in product_accounts]
     initial = {'warning': baseline.low, 'threshold': baseline.high, 'min_redemptions': baseline.min_redemptions, 'min_signals': baseline.min_signals, 'cluster_count': baseline.cluster_count, 'cluster_days': baseline.cluster_days} if baseline else {}
-    return render(request, 'desk/product.html', context(request, product=product, metrics=metrics, sales=sales, window=window, threads=history[:30], summary=summary, product_accounts=product_accounts, selected_account=str(account_id or ''), recent_sales=recent_sales,
+    return render(request, 'desk/product.html', context(request, product=product, metrics=metrics, sales=sales, window=window, threads=history[:30], summary=summary, product_accounts=product_accounts, selected_account=str(account_id or ''), recent_sales=recent_sales,market_issues=market_issues[:20],
         can_manage_rules=can_manage_rules(request.user, product), negative_rule=baseline, rule_form=NegativeRuleForm(initial=initial), account_metrics=account_metrics))
 
 

@@ -17,7 +17,7 @@ def sales_window(family, window='100', now=None, account_id=None):
     for mapping in pairs:
         all_accounts.add(mapping.account_id)
         match = Q(account_id=mapping.account_id, sku=mapping.sku)
-        if mapping.account.platform == 'wb' and mapping.account.sales_enabled:
+        if mapping.account.platform in {'wb','ym'} and mapping.account.sales_enabled:
             api_match |= match
             api_accounts.add(mapping.account_id)
         else:
@@ -29,10 +29,13 @@ def sales_window(family, window='100', now=None, account_id=None):
     feedback_states = feedback_coverage(all_accounts)
     daily = list(SalesDaily.objects.filter(daily_match).values('account_id', 'date', 'redemptions'))
     events = list(SaleEvent.objects.filter(api_match, kind='sale').order_by('-occurred_at', '-pk').values('occurred_at', 'id'))
-    return calculate_window(window, now, api_accounts, all_accounts, manual_accounts, sales_states, feedback_states, daily, events)
+    from .uncertainty import sale_issues
+    mapped={(p.account_id,p.sku) for p in pairs}
+    issues=[i for i in sale_issues(api_accounts) if (i['account_id'],i['sku']) in mapped]
+    return calculate_window(window, now, api_accounts, all_accounts, manual_accounts, sales_states, feedback_states, daily, events,issues)
 
 
-def calculate_window(window, now, api_accounts, all_accounts, manual_accounts, sales_states, feedback_states, daily, events):
+def calculate_window(window, now, api_accounts, all_accounts, manual_accounts, sales_states, feedback_states, daily, events, uncertainties=()):
     """Shared calculation for a single card and the bulk, globally sorted queue."""
     sales_states = {key: value for key, value in sales_states.items() if key in api_accounts}
     feedback_states = {key: value for key, value in feedback_states.items() if key in all_accounts}
@@ -78,8 +81,12 @@ def calculate_window(window, now, api_accounts, all_accounts, manual_accounts, s
         state = sales_states.get(account_id)
         if (not state or not state.coverage_since or not state.coverage_until
                 or not start_at or state.coverage_since > start_at or state.coverage_until < now - timedelta(hours=3)):
-            reasons.append('Не подтверждена полнота продаж WB за окно')
+            reasons.append('Не подтверждена полнота продаж API за окно')
             break
+    from .uncertainty import overlaps
+    ambiguous=any(overlaps(issue,start_at,until) for issue in uncertainties if issue['account_id'] in api_accounts)
+    if ambiguous:
+        reasons.append('Не подтверждены дата или количество выкупов Маркета за окно')
     sales_reasons = list(reasons)
     feedback_reasons = []
     for account_id in all_accounts:
@@ -93,4 +100,4 @@ def calculate_window(window, now, api_accounts, all_accounts, manual_accounts, s
     return {'redemptions': total, 'start': start_day, 'start_at': start_at, 'until': until, 'span_days': span_days, 'exact': exact,
             'target': target, 'reasons': list(dict.fromkeys(reasons)), 'complete': bool(all_accounts) and not reasons,
             'has_api': bool(api_accounts), 'accounts': all_accounts,
-            'sales_reasons': sales_reasons, 'feedback_reasons': feedback_reasons}
+            'sales_reasons': sales_reasons, 'feedback_reasons': feedback_reasons,'window_ambiguous':ambiguous}

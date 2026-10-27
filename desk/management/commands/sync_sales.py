@@ -2,25 +2,26 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Q
 from desk.integrations.base import IntegrationError
 from desk.integrations.wb_sales import sync_wb_sales
+from desk.integrations.ym_sales import sync_ym_sales
 from desk.models import Account
 
 
 class Command(BaseCommand):
-    help = 'Одна страница продаж WB с соблюдением пауз. Фоновая загрузка работает в voice-poll.'
+    help = 'Одна страница продаж WB/Маркета с соблюдением пауз. Фоновая загрузка работает в voice-poll.'
 
     def add_arguments(self, parser):
-        parser.add_argument('--account', required=True, help='Имя или ID кабинета WB.')
+        parser.add_argument('--account', required=True, help='Имя или ID кабинета WB/Маркета.')
 
     def handle(self, *args, **options):
         value = str(options['account'])
         match = Q(name=value)
         if value.isdigit():
             match |= Q(pk=int(value))
-        account = Account.objects.filter(match, platform='wb').select_related('company').first()
+        account = Account.objects.filter(match, platform__in=['wb','ym']).select_related('company').first()
         if not account:
-            raise CommandError('Кабинет WB не найден.')
+            raise CommandError('Кабинет WB или Маркета не найден.')
         try:
-            count = sync_wb_sales(account)
+            count = sync_wb_sales(account) if account.platform=='wb' else sync_ym_sales(account)
         except IntegrationError as error:
             raise CommandError(str(error)) from error
         self.stdout.write(f'Обработано событий: {count}. Завершение периода и счётчики: voice-manage sales_status --account "{account.name}"')

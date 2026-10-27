@@ -18,7 +18,7 @@ class ControlDataset:
         for mapping in mappings:
             self.mappings[mapping.product.code].append(mapping)
             accounts.add(mapping.account_id)
-        sales = SaleEvent.objects.filter(account_id__in=accounts, account__sales_enabled=True, account__platform='wb', kind='sale', occurred_at__lte=self.now,
+        sales = SaleEvent.objects.filter(account_id__in=accounts, account__sales_enabled=True, account__platform__in=['wb','ym'], kind='sale', occurred_at__lte=self.now,
             account__productmapping__product__code__in=codes, account__productmapping__product__company_id__in=self.company_ids,
             sku=F('account__productmapping__sku')).annotate(product_code=F('account__productmapping__product__code')).order_by('-occurred_at', '-pk')
         for row in sales.values('id', 'account_id', 'sku', 'occurred_at', 'product_code'):
@@ -32,6 +32,14 @@ class ControlDataset:
             for thread in reviews.select_related('analysis', 'assessment', 'product').defer('source_data', 'history_cursor', 'analysis__draft', 'analysis__summary', 'assessment__comment'):
                 self.threads[thread.product.code].append(thread)
         self.sales_states = {s.account_id: s for s in SalesSyncState.objects.filter(account_id__in=accounts)}
+        from .uncertainty import sale_issues
+        self.uncertainties=defaultdict(list)
+        codes_by_pair=defaultdict(set)
+        for code,pairs in self.mappings.items():
+            for pair in pairs:
+                codes_by_pair[pair.account_id,pair.sku].add(code)
+        for issue in sale_issues(accounts):
+            for code in codes_by_pair[issue['account_id'],issue['sku']]: self.uncertainties[code].append(issue)
         from desk.integrations.coverage import feedback_coverage
         self.feedback_states = feedback_coverage(accounts)
         for baseline in Baseline.objects.filter(product__code__in=codes, product__company_id__in=self.company_ids).select_related('product').order_by('product_id'):
@@ -42,11 +50,11 @@ class ControlDataset:
         if key not in self.periods:
             pairs = [m for m in self.mappings[code] if account_id is None or m.account_id == account_id]
             accounts = {m.account_id for m in pairs}
-            api = {m.account_id for m in pairs if m.account.platform == 'wb' and m.account.sales_enabled}
+            api = {m.account_id for m in pairs if m.account.platform in {'wb','ym'} and m.account.sales_enabled}
             manual = accounts - api
             events = [e for e in self.events[code] if e['account_id'] in api]
             daily = [d for d in self.daily[code] if d['account_id'] in manual]
-            self.periods[key] = calculate_window(window, self.now, api, accounts, manual, self.sales_states, self.feedback_states, daily, events)
+            self.periods[key] = calculate_window(window, self.now, api, accounts, manual, self.sales_states, self.feedback_states, daily, events,self.uncertainties[code])
         return self.periods[key]
 
     def reviews(self, code, period, account_id=None):

@@ -20,7 +20,7 @@ def refresh_baselines(product, actor=None, days=90, minimum=100):
     api_accounts, all_accounts = set(), {mapping.account_id for mapping in mappings}
     for mapping in mappings:
         match = Q(account_id=mapping.account_id, sku=mapping.sku)
-        if mapping.account.platform == 'wb' and mapping.account.sales_enabled:
+        if mapping.account.platform in {'wb','ym'} and mapping.account.sales_enabled:
             api_query |= match
             api_accounts.add(mapping.account_id)
         else:
@@ -38,6 +38,11 @@ def refresh_baselines(product, actor=None, days=90, minimum=100):
         known_manual = set(SalesDaily.objects.filter(query, date__gte=earliest, date__lt=start).values_list('account_id', flat=True))
         if all_accounts - api_accounts - known_manual:
             return 0
+        from .uncertainty import sale_issues,overlaps
+        from datetime import datetime,time
+        pairs={(m.account_id,m.sku) for m in mappings}
+        low=timezone.make_aware(datetime.combine(earliest,time.min));high=timezone.make_aware(datetime.combine(start,time.min))
+        if any(overlaps(i,low,high) for i in sale_issues(api_accounts) if (i['account_id'],i['sku']) in pairs): return 0
     count = ((SalesDaily.objects.filter(query, date__gte=earliest, date__lt=start).aggregate(total=Sum('redemptions'))['total'] or 0)
              + SaleEvent.objects.filter(api_query, kind='sale', occurred_at__date__gte=earliest, occurred_at__date__lt=start).count())
     if count < minimum: return 0

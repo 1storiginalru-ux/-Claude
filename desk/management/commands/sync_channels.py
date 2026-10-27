@@ -35,11 +35,14 @@ class Command(BaseCommand):
                         try: self.stdout.write(f'{account.name}: {sync_account(account)} объектов')
                         except IntegrationError as e: self.stderr.write(f'{account.name}: {e}')
                     from desk.integrations.wb_sales import sync_wb_sales
-                    sales_accounts = list(Account.objects.filter(enabled=True, sales_enabled=True, platform='wb', company__is_demo=False).filter(Q(sales_state__isnull=True) | Q(sales_state__next_attempt__lte=timezone.now())).select_related('company'))
+                    from desk.integrations.ym_sales import sync_ym_sales
+                    sales_accounts = list(Account.objects.filter(enabled=True, sales_enabled=True, platform__in=['wb','ym'], company__is_demo=False).filter(Q(sales_state__isnull=True) | Q(sales_state__next_attempt__lte=timezone.now())).select_related('company'))
                     for account in sales_accounts:
                         if account.pk in sales_turns: continue
-                        try: self.stdout.write(f'{account.name}, продажи WB: {sync_wb_sales(account)} событий')
-                        except IntegrationError as e: self.stderr.write(f'{account.name}, продажи WB: {e}')
+                        try:
+                            count=sync_wb_sales(account) if account.platform=='wb' else sync_ym_sales(account)
+                            self.stdout.write(f'{account.name}, продажи {account.platform}: {count} событий')
+                        except IntegrationError as e: self.stderr.write(f'{account.name}, продажи {account.platform}: {e}')
                     from desk.models import Outgoing
                     for account in history_accounts:
                         for kind in ['sales', 'reviews']:

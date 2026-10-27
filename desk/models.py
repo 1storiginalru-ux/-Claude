@@ -55,10 +55,10 @@ class Account(models.Model):
     business_id = models.CharField('Business ID (Яндекс)', max_length=40, blank=True, validators=[RegexValidator(r'^\d*$')])
     ozon_client_id = models.CharField('Client-Id (Ozon)', max_length=40, blank=True, validators=[RegexValidator(r'^\d*$')])
     enabled = models.BooleanField(default=False)
-    sales_enabled = models.BooleanField('Получать продажи WB через API', default=False)
+    sales_enabled = models.BooleanField('Получать продажи через API (WB / Маркет)', default=False)
     history_enabled = models.BooleanField('Догружать историю до 100 выкупов', default=True,
         help_text='Продажи WB и отзывы за соответствующий период, до 90 дней. Текущий опрос остаётся отдельным.')
-    sales_token_env = models.CharField('Переменная отдельного ключа статистики WB', max_length=100, blank=True, validators=[RegexValidator(r'^[A-Z][A-Z0-9_]*$')], help_text='Пусто — использовать ключ кабинета. Для продаж нужны права «Статистика».')
+    sales_token_env = models.CharField('Переменная отдельного ключа продаж', max_length=100, blank=True, validators=[RegexValidator(r'^[A-Z][A-Z0-9_]*$')], help_text='Пусто — ключ кабинета. WB: «Статистика»; Маркет: чтение заказов и статистики.')
     last_sync = models.DateTimeField(null=True, blank=True)
     sync_status = models.CharField(max_length=240, default='Ещё не запускалась')
 
@@ -68,8 +68,12 @@ class Account(models.Model):
         from django.core.exceptions import ValidationError
         if self.company_id and self.company.is_demo and self.enabled:
             raise ValidationError('Для демо-компании внешние интеграции включать нельзя. Создайте реальную компанию.')
-        if self.sales_enabled and (self.platform != 'wb' or not self.company_id or self.company.is_demo):
-            raise ValidationError('Автоматические продажи пока доступны только для реального кабинета WB.')
+        if self.sales_enabled and (self.platform not in {'wb','ym'} or not self.company_id or self.company.is_demo):
+            raise ValidationError('Автоматические продажи доступны для реального кабинета WB или Маркета.')
+        if self.sales_enabled and self.platform == 'ym':
+            if not self.business_id.isdigit(): raise ValidationError('Для продаж Маркета нужен числовой Business ID.')
+            if Account.objects.filter(platform='ym',sales_enabled=True,business_id=self.business_id).exclude(pk=self.pk).exists():
+                raise ValidationError('Продажи этого бизнеса Маркета уже подключены в другом кабинете.')
         if self.platform == 'ozon' and self.enabled and not self.ozon_client_id.isdigit():
             raise ValidationError('Для подключения Ozon укажите числовой Client-Id.')
         if self.pk and Account.objects.filter(pk=self.pk).exclude(company_id=self.company_id).exists() and (self.thread_set.exists() or self.productmapping_set.exists()):
@@ -165,6 +169,18 @@ class SalesSyncState(models.Model):
     coverage_until = models.DateTimeField(null=True, blank=True)
     last_sync = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=240, blank=True)
+
+
+class YandexOrderState(models.Model):
+    account = models.ForeignKey(Account,on_delete=models.PROTECT)
+    campaign_id = models.CharField(max_length=40)
+    order_id = models.CharField(max_length=40)
+    changed_at = models.DateTimeField()
+    issues = models.JSONField(default=list)
+    source_data = models.JSONField(default=dict)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['account','campaign_id','order_id'],name='ym_order_version_unique')]
 
 
 class Thread(models.Model):
