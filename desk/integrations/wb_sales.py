@@ -6,7 +6,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from desk.models import SaleEvent, SalesSyncState
+from desk.models import Account, SaleEvent, SalesSyncState
 from desk.products.identifiers import wb_nm_id
 from .base import Adapter, IntegrationError
 from .coverage import record_coverage
@@ -39,6 +39,43 @@ class WBSales(Adapter):
         return observe(token, response, namespace='wb-sales', fallback=7200, maximum=86400)
 
 
+def sales_page(rows, since, until, changed_since):
+    if not isinstance(rows, list) or len(rows) > 80000:
+        raise IntegrationError('Неожиданный формат отчёта продаж WB.')
+    events, changes = {}, []
+    for row in rows:
+        if not isinstance(row, dict): raise IntegrationError('WB вернул некорректную строку продаж.')
+        changed, occurred = source_time(row.get('lastChangeDate')), source_time(row.get('date'))
+        identifier, sku = row.get('saleID'), wb_nm_id(row.get('nmId'))
+        if not changed or not occurred or not sku or not isinstance(identifier, str) or not 1 < len(identifier) <= 160 or identifier[0] not in {'S', 'R'}:
+            raise IntegrationError('В строке продаж WB отсутствуют достоверные saleID, nmId или даты. Период не отмечен полным.')
+        changes.append(changed)
+        if changed > until: raise IntegrationError('WB вернул будущую дату изменения продажи. Полнота периода не подтверждена.')
+        if not since <= occurred <= until or changed < changed_since: continue
+        order_id = str(row.get('srid') or '')
+        if len(order_id) > 160: raise IntegrationError('WB вернул слишком длинный ID заказа.')
+        events[identifier] = SaleEvent(external_id=identifier, sku=sku, kind='sale' if identifier[0] == 'S' else 'return',
+            occurred_at=occurred, changed_at=changed, order_id=order_id, source_data=row)
+    if changes and (changes[-1] != max(changes) or changes[-1] <= changed_since):
+        raise IntegrationError('Страница продаж WB не продвигает lastChangeDate. Требуется проверка; полнота периода не подтверждена.')
+    return events
+
+
+@transaction.atomic
+def store_sales(account, events):
+    # Fresh and historical readers share sale IDs. Serialize their upserts so
+    # an older response cannot overwrite a newer correction from another lane.
+    Account.objects.select_for_update().get(pk=account.pk)
+    identifiers = list(events)
+    for offset in range(0, len(identifiers), 500):
+        for identifier, stored_change in SaleEvent.objects.filter(account=account, external_id__in=identifiers[offset:offset+500]).values_list('external_id', 'changed_at'):
+            if events[identifier].changed_at < stored_change: del events[identifier]
+    for event in events.values(): event.account = account
+    SaleEvent.objects.bulk_create(list(events.values()), update_conflicts=True, unique_fields=['account','external_id'],
+        update_fields=['sku','kind','occurred_at','changed_at','order_id','source_data','synced_at'], batch_size=500)
+    return len(events)
+
+
 def sync_wb_sales(account):
     if account.platform != 'wb' or not account.sales_enabled or not account.enabled or account.company.is_demo:
         raise IntegrationError('Включите продажи в настройках реального кабинета WB.', request_sent=False)
@@ -68,42 +105,14 @@ def sync_wb_sales(account):
             SalesSyncState.objects.filter(pk=state.pk, lease_token=lease).update(cursor={}, last_sync=now, next_attempt=now + timedelta(minutes=30), status='Продажи WB: период загружен полностью. Оперативный отчёт, не финансовая сверка.')
             return 0
         observed_until = timezone.now()
-        events, changes = {}, []
-        for row in rows:
-            if not isinstance(row, dict):
-                raise IntegrationError('WB вернул некорректную строку продаж.')
-            changed = source_time(row.get('lastChangeDate'))
-            occurred = source_time(row.get('date'))
-            identifier, sku = row.get('saleID'), wb_nm_id(row.get('nmId'))
-            if not changed or not occurred or not sku or not isinstance(identifier, str) or not 1 < len(identifier) <= 160 or identifier[0] not in {'S', 'R'}:
-                raise IntegrationError('В строке продаж WB отсутствуют достоверные saleID, nmId или даты. Период не отмечен полным.')
-            changes.append(changed)
-            if changed > observed_until:
-                raise IntegrationError('WB вернул будущую дату изменения продажи. Полнота периода не подтверждена.')
-            if not max(lower, since) <= occurred <= observed_until or changed < lower:
-                continue
-            order_id = str(row.get('srid') or '')
-            if len(order_id) > 160:
-                raise IntegrationError('WB вернул слишком длинный ID заказа.')
-            events[identifier] = SaleEvent(account=account, external_id=identifier, sku=sku,
-                                           kind='sale' if identifier[0] == 'S' else 'return',
-                                           occurred_at=occurred, changed_at=changed, order_id=order_id, source_data=row)
-        last_change = changes[-1]
-        if last_change != max(changes) or last_change <= page_from:
-            raise IntegrationError('Страница продаж WB не продвигает lastChangeDate. Требуется проверка; полнота периода не подтверждена.')
+        events = sales_page(rows, max(lower, since), observed_until, page_from)
         cursor['page_from'] = rows[-1]['lastChangeDate']
         cursor['until'] = observed_until.isoformat()
         with transaction.atomic():
+            Account.objects.select_for_update().get(pk=account.pk)
             if not SalesSyncState.objects.select_for_update().filter(pk=state.pk, lease_token=lease).first():
                 raise IntegrationError('Загрузка продаж передана другому процессу.')
-            identifiers = list(events)
-            for offset in range(0, len(identifiers), 500):
-                for identifier, stored_change in SaleEvent.objects.filter(account=account, external_id__in=identifiers[offset:offset + 500]).values_list('external_id', 'changed_at'):
-                    if events[identifier].changed_at < stored_change:
-                        del events[identifier]
-            SaleEvent.objects.bulk_create(list(events.values()), update_conflicts=True,
-                                         unique_fields=['account', 'external_id'],
-                                         update_fields=['sku', 'kind', 'occurred_at', 'changed_at', 'order_id', 'source_data', 'synced_at'], batch_size=500)
+            store_sales(account, events)
             SalesSyncState.objects.filter(pk=state.pk, lease_token=lease).update(cursor=cursor, next_attempt=now + timedelta(seconds=61), status=f'Обработано событий: {len(events)}. Продолжается загрузка; полнота периода ещё не подтверждена.')
         return len(events)
     except IntegrationError as error:

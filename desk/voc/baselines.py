@@ -27,7 +27,8 @@ def refresh_baselines(product, actor=None, days=90, minimum=100):
             query |= match
     if api_accounts:
         coverages = list(SalesSyncState.objects.filter(account_id__in=api_accounts).values_list('coverage_since', 'coverage_until'))
-        feedback = list(SyncState.objects.filter(account_id__in=all_accounts).values_list('coverage_since', 'coverage_until'))
+        from desk.integrations.coverage import feedback_coverage
+        feedback = [(s.coverage_since, s.coverage_until) for s in feedback_coverage(all_accounts).values()]
         if len(coverages) != len(api_accounts) or len(feedback) != len(all_accounts) or any(not low or not high for low, high in coverages + feedback):
             return 0
         from django.utils import timezone

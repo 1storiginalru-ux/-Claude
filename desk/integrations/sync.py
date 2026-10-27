@@ -9,7 +9,7 @@ from .base import IntegrationError, get_adapter
 
 
 @transaction.atomic
-def ingest(account, incoming):
+def ingest(account, incoming, *, historical=False):
     from desk.ai.classification import review_sections
     mappings = ProductMapping.objects.filter(account=account, sku=incoming.sku)
     if account.platform == 'wb' and not account.company.is_demo:
@@ -29,7 +29,7 @@ def ingest(account, incoming):
         thread.save(update_fields=['sku', 'product'])
     if changed:
         thread.text, thread.rating = incoming.text, incoming.rating
-        if thread.status == 'Закрыто':
+        if thread.status == 'Закрыто' and not historical:
             thread.status, thread.closed_at = 'Новое', None
         thread.save(update_fields=['text', 'rating', 'status', 'closed_at'])
     if incoming.source_data is not None:
@@ -58,14 +58,14 @@ def ingest(account, incoming):
                 before={'source_fingerprint': assessment.source_fingerprint, 'sections': old_sections},
                 after={'source_fingerprint': '0' * 64, 'sections': new_sections})
             ReviewAssessment.objects.filter(pk=assessment.pk).update(source_fingerprint='0' * 64)
-        if thread.status == 'Закрыто':
+        if thread.status == 'Закрыто' and not historical:
             thread.status, thread.closed_at = 'Новое', None
             thread.save(update_fields=['status', 'closed_at'])
     revision = hashlib.sha256(incoming.text.encode()).hexdigest()[:24]
     message, _ = Message.objects.get_or_create(thread=thread, external_id='source-' + revision, direction='in', defaults={'text': incoming.text, 'created_at': received})
     if incoming.source_data is not None:
         Message.objects.filter(pk=message.pk).update(source_data=incoming.source_data)
-    for reply in incoming.replies: ingest_reply(thread, reply)
+    for reply in incoming.replies: ingest_reply(thread, reply, allow_reopen=not historical)
     return thread, created or changed or context_changed
 
 

@@ -55,6 +55,8 @@ class Account(models.Model):
     business_id = models.CharField('Business ID (Яндекс)', max_length=40, blank=True, validators=[RegexValidator(r'^\d*$')])
     enabled = models.BooleanField(default=False)
     sales_enabled = models.BooleanField('Получать продажи WB через API', default=False)
+    history_enabled = models.BooleanField('Догружать историю до 100 выкупов', default=True,
+        help_text='Продажи WB и отзывы за соответствующий период, до 90 дней. Текущий опрос остаётся отдельным.')
     sales_token_env = models.CharField('Переменная отдельного ключа статистики WB', max_length=100, blank=True, validators=[RegexValidator(r'^[A-Z][A-Z0-9_]*$')], help_text='Пусто — использовать ключ кабинета. Для продаж нужны права «Статистика».')
     last_sync = models.DateTimeField(null=True, blank=True)
     sync_status = models.CharField(max_length=240, default='Ещё не запускалась')
@@ -340,3 +342,21 @@ class SyncState(models.Model):
     lease_until = models.DateTimeField(null=True, blank=True)
     coverage_since = models.DateTimeField(null=True, blank=True)
     coverage_until = models.DateTimeField(null=True, blank=True)
+
+
+class HistorySyncState(models.Model):
+    account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name='history_states')
+    kind = models.CharField(max_length=10, choices=[('sales', 'Продажи'), ('reviews', 'Отзывы')])
+    days = models.PositiveSmallIntegerField(default=7)
+    cursor = models.JSONField(default=dict)
+    coverage_since = models.DateTimeField(null=True, blank=True)
+    coverage_until = models.DateTimeField(null=True, blank=True)
+    next_attempt = models.DateTimeField(default=timezone.now)
+    last_request_at = models.DateTimeField(null=True, blank=True)
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    exhausted = models.BooleanField(default=False)
+    status = models.CharField(max_length=240, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['account', 'kind'], name='history_account_kind')]

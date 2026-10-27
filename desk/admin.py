@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.forms.models import model_to_dict
-from .models import Account, Analysis, Audit, Baseline, Company, Incident, Membership, Message, Outgoing, Product, ProductMapping, ReviewAssessment, SaleEvent, SalesSyncState, SalesDaily, SyncLog, Team, Thread
+from .models import Account, Analysis, Audit, Baseline, Company, HistorySyncState, Incident, Membership, Message, Outgoing, Product, ProductMapping, ReviewAssessment, SaleEvent, SalesSyncState, SalesDaily, SyncLog, Team, Thread
 
 
 class AuditedAdmin(admin.ModelAdmin):
@@ -22,7 +22,7 @@ class CompanyAdmin(AuditedAdmin):
 
 @admin.register(Account)
 class AccountAdmin(AuditedAdmin):
-    list_display = ['name', 'company', 'platform', 'enabled', 'sales_enabled', 'last_sync']
+    list_display = ['name', 'company', 'platform', 'enabled', 'sales_enabled', 'history_enabled', 'last_sync']
     readonly_fields = ['last_sync', 'sync_status']
 
 
@@ -59,6 +59,7 @@ class SaleEventAdmin(ReadOnlyAdmin):
 
 
 admin.site.register(SalesSyncState, ReadOnlyAdmin)
+admin.site.register(HistorySyncState, ReadOnlyAdmin)
 admin.site.register(ReviewAssessment, ReadOnlyAdmin)
 
 

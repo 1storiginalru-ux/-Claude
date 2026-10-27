@@ -1,6 +1,6 @@
 from datetime import timedelta
 from django.utils import timezone
-from desk.models import ProductMapping, SaleEvent, SalesDaily, SalesSyncState, SyncState
+from desk.models import HistorySyncState, ProductMapping, SaleEvent, SalesDaily, SalesSyncState, SyncState
 from desk.voc.rules import evaluate, grouped_signals, human_only, review_summary
 from .base import DeskCase
 
@@ -16,6 +16,7 @@ class ProductMetricTests(DeskCase):
         since = self.now - timedelta(days=7)
         SalesSyncState.objects.create(account=self.account, coverage_since=since, coverage_until=self.now)
         SyncState.objects.create(account=self.account, coverage_since=since, coverage_until=self.now)
+        HistorySyncState.objects.create(account=self.account, kind='reviews', coverage_since=since, coverage_until=self.now)
 
     def sales_events(self, count=100):
         SaleEvent.objects.bulk_create([SaleEvent(account=self.account, external_id=f'S{n}', sku='123', kind='sale', occurred_at=self.now - timedelta(minutes=n + 5), changed_at=self.now) for n in range(count)])
@@ -76,6 +77,7 @@ class ProductMetricTests(DeskCase):
     def test_missing_feedback_history_does_not_report_a_false_zero(self):
         self.sales_events(); self.reviews(1, 0)
         SyncState.objects.filter(account=self.account).update(coverage_since=self.now - timedelta(minutes=1))
+        HistorySyncState.objects.filter(account=self.account,kind='reviews').update(coverage_since=self.now - timedelta(minutes=1))
         summary = review_summary(self.product, now=self.now)
         self.assertIsNone(summary['review_rate'])
         self.assertIsNone(summary['per100'])

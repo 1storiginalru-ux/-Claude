@@ -10,7 +10,7 @@ from django.test import TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from desk.forms import NegativeRuleForm
-from desk.models import Analysis, Audit, Baseline, Incident, Membership, Product, ProductMapping, ReviewAssessment, SaleEvent, SalesDaily, SalesSyncState, SyncState
+from desk.models import Analysis, Audit, Baseline, HistorySyncState, Incident, Membership, Product, ProductMapping, ReviewAssessment, SaleEvent, SalesDaily, SalesSyncState, SyncState
 from desk.reviews import assess_review, effective_analysis, fingerprint
 from desk.voc.dataset import ControlDataset
 from desk.voc.rules import evaluate, review_summary
@@ -26,6 +26,7 @@ class ReviewControlCase(DeskCase):
         self.now = timezone.now()
         SalesSyncState.objects.create(account=self.account, coverage_since=self.now - timedelta(days=7), coverage_until=self.now)
         SyncState.objects.create(account=self.account, coverage_since=self.now - timedelta(days=7), coverage_until=self.now)
+        HistorySyncState.objects.create(account=self.account, kind='reviews', coverage_since=self.now - timedelta(days=7), coverage_until=self.now)
         self.client.force_login(self.user)
 
     def events(self, count=100, product=None, sku='sku1'):
@@ -366,6 +367,7 @@ class ConcurrentHumanReviewTests(TransactionTestCase):
         ProductMapping.objects.create(account=account, product=product, sku='123', external_product_id='123')
         SalesSyncState.objects.create(account=account, coverage_since=now-timedelta(days=7), coverage_until=now)
         SyncState.objects.create(account=account, coverage_since=now-timedelta(days=7), coverage_until=now)
+        HistorySyncState.objects.create(account=account, kind='reviews', coverage_since=now-timedelta(days=7), coverage_until=now)
         SaleEvent.objects.bulk_create([SaleEvent(account=account, sku='123', external_id=f'S-concurrent-{i}', kind='sale', occurred_at=now-timedelta(minutes=i+5), changed_at=now) for i in range(100)])
         Baseline.objects.create(product=product, signal='NEGATIVE', low=5, high=10, min_redemptions=100, cluster_count=2, cluster_days=3)
         decisions = []

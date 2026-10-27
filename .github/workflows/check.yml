@@ -70,3 +70,4 @@ jobs:
           desk.tests.test_review_control
           desk.tests.test_classification
           desk.tests.test_demo_cleanup
+          desk.tests.test_history

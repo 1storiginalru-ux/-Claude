@@ -1,5 +1,6 @@
 """Use individual API events when configured; never add them to the same CSV sales."""
 from datetime import datetime, time, timedelta
+import math
 from django.db.models import Q
 from django.utils import timezone
 from desk.models import ProductMapping, SaleEvent, SalesDaily, SalesSyncState, SyncState
@@ -24,7 +25,8 @@ def sales_window(family, window='100', now=None, account_id=None):
             manual_accounts.add(mapping.account_id)
     exact = bool(api_accounts) and not manual_accounts
     sales_states = {state.account_id: state for state in SalesSyncState.objects.filter(account_id__in=api_accounts)}
-    feedback_states = {state.account_id: state for state in SyncState.objects.filter(account_id__in=all_accounts)}
+    from desk.integrations.coverage import feedback_coverage
+    feedback_states = feedback_coverage(all_accounts)
     daily = list(SalesDaily.objects.filter(daily_match).values('account_id', 'date', 'redemptions'))
     events = list(SaleEvent.objects.filter(api_match, kind='sale').order_by('-occurred_at', '-pk').values('occurred_at', 'id'))
     return calculate_window(window, now, api_accounts, all_accounts, manual_accounts, sales_states, feedback_states, daily, events)
@@ -87,7 +89,8 @@ def calculate_window(window, now, api_accounts, all_accounts, manual_accounts, s
             feedback_reasons.append('Не подтверждена полнота отзывов за окно')
             break
     reasons.extend(feedback_reasons)
-    return {'redemptions': total, 'start': start_day, 'start_at': start_at, 'until': until, 'exact': exact,
+    span_days = max(1, math.ceil((until-start_at).total_seconds()/86400)) if start_at else None
+    return {'redemptions': total, 'start': start_day, 'start_at': start_at, 'until': until, 'span_days': span_days, 'exact': exact,
             'target': target, 'reasons': list(dict.fromkeys(reasons)), 'complete': bool(all_accounts) and not reasons,
             'has_api': bool(api_accounts), 'accounts': all_accounts,
             'sales_reasons': sales_reasons, 'feedback_reasons': feedback_reasons}

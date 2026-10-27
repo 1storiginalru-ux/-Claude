@@ -3,7 +3,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from desk.demo_data import PRODUCTS, EXAMPLES
-from desk.models import (Account, Analysis, Audit, Baseline, Company, Incident, Message,
+from desk.models import (Account, Analysis, Audit, Baseline, Company, HistorySyncState, Incident, Message,
                          Outgoing, Product, ProductMapping, ReviewAssessment, SaleEvent,
                          SalesDaily, SalesSyncState, SyncLog, SyncState, Thread)
 
@@ -64,7 +64,8 @@ def purge_demo(*, apply=False):
         reject(not set(map(str, snapshot.get('company_ids', []))) <= set(map(str, company_ids)), 'Снимок расследования включает рабочую компанию.')
         reject(snapshot.get('account_id') is not None and snapshot['account_id'] not in account_ids, 'Снимок расследования включает рабочий кабинет.')
     reject(SyncState.objects.filter(account_id__in=account_ids, lease_until__gt=timezone.now()).exists()
-           or SalesSyncState.objects.filter(account_id__in=account_ids, lease_until__gt=timezone.now()).exists(), 'Для демо-кабинета ещё действует блокировка синхронизации.')
+           or SalesSyncState.objects.filter(account_id__in=account_ids, lease_until__gt=timezone.now()).exists()
+           or HistorySyncState.objects.filter(account_id__in=account_ids, lease_until__gt=timezone.now()).exists(), 'Для демо-кабинета ещё действует блокировка синхронизации.')
 
     counts = {
         'reviews': sum(row['kind'] == 'review' for row in thread_rows),
@@ -77,7 +78,7 @@ def purge_demo(*, apply=False):
         'mappings': ProductMapping.objects.filter(account_id__in=account_ids).count(),
         'daily_sales': daily.count(), 'baselines': Baseline.objects.filter(product_id__in=product_ids).count(),
         'sync_logs': SyncLog.objects.filter(account_id__in=account_ids).count(),
-        'sync_states': SyncState.objects.filter(account_id__in=account_ids).count() + SalesSyncState.objects.filter(account_id__in=account_ids).count(),
+        'sync_states': SyncState.objects.filter(account_id__in=account_ids).count() + SalesSyncState.objects.filter(account_id__in=account_ids).count() + HistorySyncState.objects.filter(account_id__in=account_ids).count(),
     }
     if not apply or not any(counts.values()): return counts
     Outgoing.objects.filter(thread_id__in=thread_ids).delete()
