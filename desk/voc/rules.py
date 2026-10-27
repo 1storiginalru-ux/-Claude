@@ -1,6 +1,7 @@
 from datetime import timedelta
 from django.utils import timezone
 from desk.models import Baseline, Thread
+from desk.reviews import effective_analysis
 
 SIGNALS = {'AUTH', 'AUTH-SCENT', 'AUTH-LONGEVITY', 'AUTH-MARKING', 'AUTH-PACK', 'AUTH-UNKNOWN', 'LONG', 'SCENT', 'PACK', 'DEFECT', 'MARK', 'DELIVERY', 'SERVICE', 'RETURN', 'CONTENT', 'PRICE', 'OTHER'}
 PRODUCT_SIGNALS = ['LONG_AUTH', 'SCENT', 'PACK', 'DEFECT', 'MARK', 'RETURN']
@@ -12,7 +13,10 @@ def trusted_analysis(analysis):
 
 
 def signal_label(signal):
-    return {'LONG_AUTH': 'Стойкость и оригинальность'}.get(signal, signal)
+    return {'NEGATIVE': 'Общий негатив', 'LONG_AUTH': 'Стойкость и оригинальность', 'SCENT': 'Аромат',
+            'PACK': 'Упаковка', 'DEFECT': 'Дефект', 'MARK': 'Маркировка', 'RETURN': 'Возврат',
+            'DELIVERY': 'Доставка', 'SERVICE': 'Обслуживание', 'CONTENT': 'Описание товара',
+            'PRICE': 'Цена', 'OTHER': 'Другая причина'}.get(signal, signal)
 
 
 def grouped_signals(signals):
@@ -21,12 +25,16 @@ def grouped_signals(signals):
 
 def matches(signals, signal):
     if signal == 'LONG_AUTH':
-        return any(value == 'LONG' or value.startswith('AUTH') for value in signals)
+        return any(value in {'LONG', 'LONG_AUTH'} or value.startswith('AUTH') for value in signals)
     return any(x == signal or (signal == 'AUTH' and x.startswith('AUTH-')) for x in signals)
 
 
 def human_only(result):
-    return result['severity'] == 'P0' or any(s.startswith('AUTH') or s in {'RETURN', 'MARK'} or (s == 'DEFECT' and result['severity'] in {'P0', 'P1'}) for s in result['signals'])
+    return result['severity'] == 'P0' or any(s.startswith('AUTH') or s in {'LONG_AUTH', 'RETURN', 'MARK'} or (s == 'DEFECT' and result['severity'] in {'P0', 'P1'}) for s in result['signals'])
+
+
+def is_negative(analysis):
+    return bool(analysis and (analysis.sentiment == 'negative' or analysis.hidden_negative))
 
 
 def product_family(product, scope=None):
@@ -36,64 +44,87 @@ def product_family(product, scope=None):
     return products
 
 
-def evaluate(product, signal, window='100', now=None, scope=None, account_id=None):
-    now = now or timezone.now()
+def evaluate(product, signal, window='100', now=None, scope=None, account_id=None, dataset=None):
+    now = now or (dataset.now if dataset else timezone.now())
     from .windows import sales_window
-    family = product_family(product, scope)
-    period = sales_window(family, window, now, account_id)
+    family = product_family(product, scope) if dataset is None else None
+    period = dataset.period(product.code, window, account_id) if dataset else sales_window(family, window, now, account_id)
     total, start = period['redemptions'], period['start']
-    threads = Thread.objects.filter(product__in=family, kind='review', received_at__lte=period['until']).select_related('analysis')
-    if account_id is not None: threads = threads.filter(account_id=account_id)
-    if period['start_at']: threads = threads.filter(received_at__gte=period['start_at'])
-    else: threads = threads.none()
-    threads = list(threads)
-    classification_missing = any(not trusted_analysis(getattr(t, 'analysis', None)) for t in threads)
-    selected = [t for t in threads if trusted_analysis(getattr(t, 'analysis', None)) and matches(t.analysis.signals, signal)]
+    if dataset:
+        threads = dataset.reviews(product.code, period, account_id)
+    else:
+        threads = Thread.objects.filter(product__in=family, kind='review', received_at__lte=period['until']).select_related('analysis', 'assessment')
+        if account_id is not None: threads = threads.filter(account_id=account_id)
+        threads = list(threads.filter(received_at__gte=period['start_at'])) if period['start_at'] else []
+    analyses = [(t, effective_analysis(t)) for t in threads]
+    classification_missing = any(not trusted_analysis(a) for _, a in analyses)
+    selected = [t for t, a in analyses if trusted_analysis(a) and is_negative(a) and (signal == 'NEGATIVE' or matches(a.signals, signal))]
     count = len(selected)
-    rate = round(count / total * 100, 2) if total else None
-    baseline = None if account_id is not None else Baseline.objects.filter(product__code=product.code, signal=signal).order_by('product_id').first()
-    status, reason = 'WATCH', 'Baseline не настроен'
+    raw_rate = count / total * 100 if total else None
+    rate = round(raw_rate, 2) if raw_rate is not None else None
+    baseline = (dataset.baselines.get((product.code, signal)) if dataset else Baseline.objects.filter(product__in=family, signal=signal).order_by('product_id').first()) if account_id is None or signal == 'NEGATIVE' else None
+    status, reason = 'WATCH', 'Порог не настроен'
     cluster = False
+    cluster_selected = []
     if baseline:
-        cluster = sum(t.received_at >= now - timedelta(days=baseline.cluster_days) for t in selected) >= baseline.cluster_count
+        cluster_start = now - timedelta(days=baseline.cluster_days)
+        if dataset:
+            recent_source = dataset.threads[product.code]
+        else:
+            recent_source = Thread.objects.filter(product__in=family, kind='review', received_at__gte=cluster_start, received_at__lte=now).select_related('analysis', 'assessment')
+            if account_id is not None: recent_source = recent_source.filter(account_id=account_id)
+        recent = [t for t in recent_source if cluster_start <= t.received_at <= now and (account_id is None or t.account_id == account_id)
+                  and trusted_analysis(a := effective_analysis(t)) and is_negative(a) and (signal == 'NEGATIVE' or matches(a.signals, signal))]
+        if signal == 'NEGATIVE':
+            groups = [[t for t in recent if matches(effective_analysis(t).signals, theme)] for theme in PRODUCT_SIGNALS]
+            cluster_selected = max(groups, key=len, default=[])
+        else:
+            cluster_selected = recent
+        cluster = len(cluster_selected) >= baseline.cluster_count
         if total < baseline.min_redemptions:
             reason = 'Недостаточная выборка'
-        elif rate is not None and rate > baseline.high and count >= baseline.min_signals:
-            status, reason = 'ANOMALY', 'Частота выше baseline'
-        elif rate is not None and rate > baseline.high:
+        elif raw_rate is not None and (raw_rate >= baseline.high if signal == 'NEGATIVE' else raw_rate > baseline.high) and count >= baseline.min_signals:
+            status, reason = 'ANOMALY', 'Достигнут порог расследования' if signal == 'NEGATIVE' else 'Частота выше обычного уровня'
+        elif raw_rate is not None and (raw_rate >= baseline.high if signal == 'NEGATIVE' else raw_rate > baseline.high):
             reason = 'Недостаточно сигналов для аномалии'
+        elif signal == 'NEGATIVE' and raw_rate is not None and raw_rate >= baseline.low and count >= baseline.min_signals:
+            reason = 'Достигнут порог предупреждения'
         else:
-            status, reason = 'NORMAL', 'В пределах baseline'
+            status, reason = 'NORMAL', 'В пределах настроенного порога'
         if cluster: status, reason = 'ANOMALY', 'Кластер похожих сигналов'
-    if period['has_api'] and not period['complete']:
+    if (period['has_api'] or signal == 'NEGATIVE') and not period['complete']:
         rate, status, reason = None, 'WATCH', '; '.join(period['reasons'])
     if classification_missing:
         rate, status, reason = None, 'WATCH', 'Не все отзывы разобраны; предварительная разметка не подтверждает отсутствие жалоб'
     if cluster:
         status, reason = 'ANOMALY', 'Кластер похожих подтверждённых сигналов'
-    return {'signal': signal, 'label': signal_label(signal), 'count': count, 'redemptions': total, 'rate': rate, 'start': start, 'status': status, 'reason': reason, 'baseline': baseline, 'cluster': cluster, 'period': period}
+    evidence = {t.pk: t for t in selected}
+    if cluster: evidence.update({t.pk: t for t in cluster_selected})
+    return {'signal': signal, 'label': signal_label(signal), 'count': count, 'redemptions': total, 'rate': rate, 'start': start, 'status': status, 'reason': reason, 'baseline': baseline, 'cluster': cluster, 'cluster_count': len(cluster_selected) if cluster else 0,
+            'period': period, 'selected': list(evidence.values()), 'account_id': account_id}
 
 
-def review_summary(product, window='100', now=None, scope=None, account_id=None):
-    now = now or timezone.now()
+def review_summary(product, window='100', now=None, scope=None, account_id=None, dataset=None):
+    now = now or (dataset.now if dataset else timezone.now())
     from .windows import sales_window
-    family = product_family(product, scope)
-    period = sales_window(family, window, now, account_id)
-    reviews = Thread.objects.filter(product__in=family, kind='review', received_at__lte=period['until']).select_related('analysis')
-    if account_id is not None: reviews = reviews.filter(account_id=account_id)
-    if period['start_at']:
-        reviews = reviews.filter(received_at__gte=period['start_at'])
+    if dataset:
+        period = dataset.period(product.code, window, account_id)
+        reviews = dataset.reviews(product.code, period, account_id)
     else:
-        reviews = reviews.none()
+        family = product_family(product, scope)
+        period = sales_window(family, window, now, account_id)
+        reviews = Thread.objects.filter(product__in=family, kind='review', received_at__lte=period['until']).select_related('analysis', 'assessment')
+        if account_id is not None: reviews = reviews.filter(account_id=account_id)
+        reviews = reviews.filter(received_at__gte=period['start_at']) if period['start_at'] else reviews.none()
     total, classified, negative, preliminary = 0, 0, 0, 0
     for review in reviews:
         total += 1
-        analysis = getattr(review, 'analysis', None)
+        analysis = effective_analysis(review)
         if not trusted_analysis(analysis):
             preliminary += bool(analysis and analysis.provider in {'rules', 'demo'})
             continue
         classified += 1
-        negative += bool(analysis.sentiment == 'negative' or analysis.hidden_negative)
+        negative += is_negative(analysis)
     reviews_complete = (bool(period['accounts']) and not period['feedback_reasons']
                         and (period['target'] is None or period['redemptions'] >= period['target'])
                         and classified == total)

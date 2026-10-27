@@ -246,6 +246,19 @@ class Baseline(models.Model):
             raise ValidationError('Размеры выборки и кластера должны быть больше нуля.')
 
 
+class ReviewAssessment(models.Model):
+    DECISIONS = [('negative', 'Негатив'), ('non_negative', 'Не негатив'), ('pending', 'Требует проверки')]
+    thread = models.OneToOneField(Thread, on_delete=models.CASCADE, related_name='assessment')
+    decision = models.CharField(max_length=20, choices=DECISIONS)
+    signals = models.JSONField(default=list)
+    severity = models.CharField(max_length=2, default='P2', choices=[(v, v) for v in ['P0', 'P1', 'P2', 'P3']])
+    objective_issue = models.BooleanField(default=False)
+    comment = models.TextField(blank=True)
+    source_fingerprint = models.CharField(max_length=64)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    reviewed_at = models.DateTimeField(auto_now=True)
+
+
 class Outgoing(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     thread = models.ForeignKey(Thread, on_delete=models.PROTECT, related_name='outgoing')
@@ -272,12 +285,13 @@ class Incident(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     signal = models.CharField(max_length=40)
     severity = models.CharField(max_length=2)
-    status = models.CharField(max_length=20, choices=[(v, v) for v in ['INVESTIGATION', 'CAPA', 'CONTROL', 'CLOSED']], default='INVESTIGATION')
+    status = models.CharField(max_length=20, choices=[('INVESTIGATION', 'Проверка'), ('CAPA', 'Принимаем меры'), ('CONTROL', 'Контроль'), ('CLOSED', 'Закрыто')], default='INVESTIGATION')
     threads = models.ManyToManyField(Thread, blank=True)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     hypothesis = models.TextField(blank=True)
     actions = models.TextField(blank=True)
     result = models.TextField(blank=True)
+    opening_snapshot = models.JSONField(default=dict, blank=True)
     due_at = models.DateTimeField(null=True, blank=True)
     bitrix_id = models.CharField(max_length=80, blank=True)
     bitrix_status = models.CharField(max_length=240, blank=True)

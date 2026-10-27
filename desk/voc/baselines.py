@@ -4,6 +4,8 @@ from django.db.models import Q, Sum
 from django.utils import timezone
 from desk.models import Audit, Baseline, SalesDaily, SaleEvent, SalesSyncState, SyncState, Thread
 from .rules import evaluate, matches, product_family, MIN_CLASSIFICATION_CONFIDENCE
+from .rules import is_negative, trusted_analysis
+from desk.reviews import effective_analysis
 
 
 def refresh_baselines(product, actor=None, days=90, minimum=100):
@@ -39,9 +41,10 @@ def refresh_baselines(product, actor=None, days=90, minimum=100):
              + SaleEvent.objects.filter(api_query, kind='sale', occurred_at__date__gte=earliest, occurred_at__date__lt=start).count())
     if count < minimum: return 0
     history = Thread.objects.filter(product__in=product_family(product), kind='review', received_at__date__gte=earliest, received_at__date__lt=start)
-    if history.filter(Q(analysis__isnull=True) | Q(analysis__provider__in=['rules', 'demo']) | Q(analysis__confidence__lt=MIN_CLASSIFICATION_CONFIDENCE)).exists():
+    analyses = [effective_analysis(t) for t in history.select_related('analysis', 'assessment')]
+    if any(not trusted_analysis(a) for a in analyses):
         return 0
-    analyses = list(history.values_list('analysis__signals', flat=True))
+    analyses = [a.signals if is_negative(a) else [] for a in analyses]
     changed = 0
     for signal in ['AUTH', 'LONG', 'SCENT', 'PACK', 'DEFECT', 'MARK', 'RETURN', 'LONG_AUTH']:
         baseline = Baseline.objects.filter(product=product, signal=signal).first()

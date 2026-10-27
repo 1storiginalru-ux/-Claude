@@ -1,0 +1,7 @@
+{% if thread.kind == 'review' %}<section class="panel padded" id="review-assessment">
+<div class="section-heading"><h2>Решение оператора</h2>{% if assessment and assessment_current and assessment.decision != 'pending' %}<span class="pill success">Подтверждено сотрудником</span>{% else %}<span class="pill watch">Требует проверки</span>{% endif %}</div>
+{% if assessment %}<p>{{ assessment.get_decision_display }} · {{ assessment.reviewed_by.get_full_name|default:assessment.reviewed_by.username|default:'Сотрудник удалён' }} · {{ assessment.reviewed_at|date:'d.m.Y H:i' }}</p>{% if not assessment_current %}<div class="notice warning">Отзыв или привязка товара изменились после решения. Прошлое подтверждение не участвует в расчёте до повторной проверки.</div>{% endif %}{% endif %}
+<p class="muted">Решение сотрудника имеет приоритет в аналитике. Исходный AI-анализ сохраняется. «Требует проверки» исключает отзыв из подтверждённой разметки и делает расчёт предварительным.</p>
+<blockquote class="assessment-text">{{ thread.text|linebreaksbr }}</blockquote>
+{% if can_assess %}<form method="post" action="{% url 'review_assessment' thread.pk %}" class="stack assessment-form">{% csrf_token %}{{ assessment_form.as_p }}<button class="button primary">Сохранить решение</button></form>{% elif assessment %}<p>{{ assessment.comment|linebreaksbr }}</p>{% else %}<p>Для проверки нужна роль оператора или сотрудника качества.</p>{% endif %}
+</section>{% endif %}

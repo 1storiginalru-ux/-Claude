@@ -34,6 +34,8 @@ class Command(BaseCommand):
                     for account in sales_accounts:
                         try: self.stdout.write(f'{account.name}, продажи WB: {sync_wb_sales(account)} событий')
                         except IntegrationError as e: self.stderr.write(f'{account.name}, продажи WB: {e}')
+                    from desk.incidents.service import recheck_products
+                    recheck_products()
                 except OperationalError as error:
                     if not is_database_busy(error): raise
                     self.stderr.write('База временно занята. Синхронизация продолжится в следующем цикле с сохранённой страницы.')

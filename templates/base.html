@@ -2,7 +2,7 @@
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{% block title %}Voice · Клиентские коммуникации{% endblock %}</title><link rel="stylesheet" href="{% static 'app.css' %}"><script src="{% static 'app.js' %}" defer></script></head>
 <body><aside class="sidebar"><a class="logo" href="{% url 'inbox' %}"><span class="logo-mark">v</span>voice<span class="logo-dot">.</span></a><div class="workspace"><span class="avatar company-avatar">O</span><div><b>Клиентский опыт</b><small>Единое пространство</small></div></div><span class="nav-label">РАБОЧЕЕ ПРОСТРАНСТВО</span><nav>
 <a class="{% if request.resolver_match.url_name == 'inbox' or request.resolver_match.url_name == 'thread' %}active{% endif %}" href="{% url 'inbox' %}"><span>▤</span>Единый Inbox</a>
-<a class="{% if request.resolver_match.url_name == 'voc' %}active{% endif %}" href="{% url 'voc' %}"><span>◴</span>Voice of Customer</a>
+<a class="{% if request.resolver_match.url_name == 'voc' %}active{% endif %}" href="{% url 'voc' %}"><span>◴</span>Контроль товаров</a>
 <a class="{% if request.resolver_match.url_name == 'products' or request.resolver_match.url_name == 'product' %}active{% endif %}" href="{% url 'products' %}"><span>◇</span>Каталог товаров</a>
 <a class="{% if request.resolver_match.url_name == 'imports' %}active{% endif %}" href="{% url 'imports' %}"><span>⇄</span>Product Mapping</a>
 <span class="nav-label">УПРАВЛЕНИЕ</span>

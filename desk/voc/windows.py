@@ -25,26 +25,36 @@ def sales_window(family, window='100', now=None, account_id=None):
     exact = bool(api_accounts) and not manual_accounts
     sales_states = {state.account_id: state for state in SalesSyncState.objects.filter(account_id__in=api_accounts)}
     feedback_states = {state.account_id: state for state in SyncState.objects.filter(account_id__in=all_accounts)}
+    daily = list(SalesDaily.objects.filter(daily_match).values('account_id', 'date', 'redemptions'))
+    events = list(SaleEvent.objects.filter(api_match, kind='sale').order_by('-occurred_at', '-pk').values('occurred_at', 'id'))
+    return calculate_window(window, now, api_accounts, all_accounts, manual_accounts, sales_states, feedback_states, daily, events)
+
+
+def calculate_window(window, now, api_accounts, all_accounts, manual_accounts, sales_states, feedback_states, daily, events):
+    """Shared calculation for a single card and the bulk, globally sorted queue."""
+    sales_states = {key: value for key, value in sales_states.items() if key in api_accounts}
+    feedback_states = {key: value for key, value in feedback_states.items() if key in all_accounts}
+    exact = bool(api_accounts) and not manual_accounts
     until = now
     if (exact and len(sales_states) == len(api_accounts) and len(feedback_states) == len(all_accounts)
             and all(state.coverage_until for state in [*sales_states.values(), *feedback_states.values()])):
         until = min([now, *[state.coverage_until for state in sales_states.values()], *[state.coverage_until for state in feedback_states.values()]])
-    daily = list(SalesDaily.objects.filter(daily_match, date__lte=timezone.localdate(until)))
-    events = SaleEvent.objects.filter(api_match, kind='sale', occurred_at__lte=until).order_by('-occurred_at', '-pk')
+    daily = [row for row in daily if row['date'] <= timezone.localdate(until)]
+    events = [row for row in events if row['occurred_at'] <= until]
     target = None if window.endswith('d') else int(window)
     if target is None:
         start_day = timezone.localdate(until) - timedelta(days=int(window[:-1]) - 1)
         start_at = timezone.make_aware(datetime.combine(start_day, time.min))
-        total = events.filter(occurred_at__gte=start_at).count() + sum(row.redemptions for row in daily if row.date >= start_day)
+        total = sum(row['occurred_at'] >= start_at for row in events) + sum(row['redemptions'] for row in daily if row['date'] >= start_day)
     elif exact:
-        selected = list(events.values_list('occurred_at', flat=True)[:target])
+        selected = [row['occurred_at'] for row in events[:target]]
         total, start_at = len(selected), (selected[-1] if selected else None)
         start_day = timezone.localdate(start_at) if start_at else None
     else:
         by_day = {}
         for row in daily:
-            by_day[row.date] = by_day.get(row.date, 0) + row.redemptions
-        for occurred in events.values_list('occurred_at', flat=True):
+            by_day[row['date']] = by_day.get(row['date'], 0) + row['redemptions']
+        for occurred in (row['occurred_at'] for row in events):
             day = timezone.localdate(occurred)
             by_day[day] = by_day.get(day, 0) + 1
         total, start_day = 0, None
@@ -59,7 +69,7 @@ def sales_window(family, window='100', now=None, account_id=None):
     reasons = []
     if target and total < target:
         reasons.append(f'Накоплено {total} из {target} выкупов')
-    manual_present = {row.account_id for row in daily}
+    manual_present = {row['account_id'] for row in daily}
     if manual_accounts - manual_present:
         reasons.append('Не для всех кабинетов загружены продажи')
     for account_id in api_accounts:

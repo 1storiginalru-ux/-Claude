@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.forms.models import model_to_dict
-from .models import Account, Analysis, Audit, Baseline, Company, Incident, Membership, Message, Outgoing, Product, ProductMapping, SaleEvent, SalesSyncState, SalesDaily, SyncLog, Team, Thread
+from .models import Account, Analysis, Audit, Baseline, Company, Incident, Membership, Message, Outgoing, Product, ProductMapping, ReviewAssessment, SaleEvent, SalesSyncState, SalesDaily, SyncLog, Team, Thread
 
 
 class AuditedAdmin(admin.ModelAdmin):
@@ -59,6 +59,7 @@ class SaleEventAdmin(ReadOnlyAdmin):
 
 
 admin.site.register(SalesSyncState, ReadOnlyAdmin)
+admin.site.register(ReviewAssessment, ReadOnlyAdmin)
 
 
 @admin.register(Audit)

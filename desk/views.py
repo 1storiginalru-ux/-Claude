@@ -3,15 +3,19 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.db.models import Count, Q, Sum, Max, Min
+from django.db import transaction
 from django.core.paginator import Paginator
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 from django.http import JsonResponse
 from .access import OPERATORS, QUALITY, companies_for, require_role
-from .models import Account, Audit, Company, Incident, Membership, Outgoing, Product, ProductMapping, SaleEvent, SalesDaily, SyncLog, Thread
+from .models import Account, Audit, Baseline, Company, Incident, Membership, Outgoing, Product, ProductMapping, SaleEvent, SalesDaily, SyncLog, Thread
 from .voc.rules import SIGNALS, PRODUCT_SIGNALS, evaluate, human_only, product_family, grouped_signals, matches, signal_label, review_summary
 from .integrations.base import IntegrationError
+from .forms import NegativeRuleForm, ReviewAssessmentForm
+from .reviews import assess_review, assessment_is_current, effective_analysis, fingerprint
+from .voc.rules import trusted_analysis
 
 
 def health(request):
@@ -21,7 +25,7 @@ def health(request):
 
 
 def scoped_threads(user):
-    return Thread.objects.filter(account__company__in=companies_for(user)).select_related('account__company', 'product', 'analysis', 'assigned_to')
+    return Thread.objects.filter(account__company__in=companies_for(user)).select_related('account__company', 'product', 'analysis', 'assessment__reviewed_by', 'assigned_to')
 
 
 def context(request, **kwargs):
@@ -34,31 +38,70 @@ def inbox(request):
     threads = base
     q = request.GET.get('q', '').strip()
     if q: threads = threads.filter(Q(text__icontains=q) | Q(product__name__icontains=q) | Q(customer__icontains=q) | Q(product__code__icontains=q))
+    if request.GET.get('product_code'): threads = threads.filter(product__code=request.GET['product_code'])
+    if request.GET.get('recent') == '7':
+        from datetime import timedelta
+        threads = threads.filter(received_at__gte=timezone.now() - timedelta(days=7), received_at__lte=timezone.now())
     filters = {'platform': 'account__platform', 'account': 'account__name', 'company': 'account__company__name', 'status': 'status', 'kind': 'kind', 'severity': 'analysis__severity', 'rating': 'rating', 'operator': 'assigned_to__username'}
     for key, field in filters.items():
         value = request.GET.get(key, '')
         if value and (key != 'rating' or value.isdigit()): threads = threads.filter(**{field: value})
-    if request.GET.get('negative'): threads = threads.filter(Q(analysis__sentiment='negative') | Q(analysis__hidden_negative=True))
+    if request.GET.get('negative'):
+        from .voc.rules import is_negative
+        threads = threads.filter(pk__in=[t.pk for t in threads if is_negative(effective_analysis(t))])
+    if request.GET.get('needs_review'):
+        threads = threads.filter(pk__in=[t.pk for t in threads.filter(kind='review') if not trusted_analysis(effective_analysis(t))])
     if request.GET.get('unmapped'): threads = threads.filter(product__isnull=True)
     if request.GET.get('overdue'): threads = threads.filter(due_at__lt=timezone.now()).exclude(status__in=['Закрыто', 'Ответ отправлен', 'Ожидаем клиента'])
     signal = request.GET.get('signal')
     if signal in SIGNALS or signal == 'LONG_AUTH':
-        ids = [t.pk for t in threads if hasattr(t, 'analysis') and matches(t.analysis.signals, signal)]
+        ids = [t.pk for t in threads if (a := effective_analysis(t)) and matches(a.signals, signal)]
         threads = threads.filter(pk__in=ids)
     from django.core.paginator import Paginator
     page = Paginator(threads, 30).get_page(request.GET.get('page'))
+    for thread in page:
+        a = effective_analysis(thread)
+        thread.display_signals = [signal_label(s) for s in grouped_signals(a.signals)] if a else []
+        thread.assessment_current = assessment_is_current(thread)
+        thread.classification_trusted = trusted_analysis(a)
     return render(request, 'desk/inbox.html', context(request, page=page, statuses=Thread.STATUSES, signals=[{'code': s, 'label': signal_label(s)} for s in grouped_signals(SIGNALS)], accounts=Account.objects.filter(company__in=companies_for(request.user)), total=base.count(), fresh=base.filter(status='Новое').count(), overdue=base.filter(due_at__lt=timezone.now()).exclude(status__in=['Закрыто', 'Ответ отправлен', 'Ожидаем клиента']).count(), failed=base.filter(status='Ошибка отправки').count()))
 
 
 @login_required
-def thread_detail(request, pk):
+def thread_detail(request, pk, assessment_form=None, form_status=200):
     from .integrations.content import content_view
     from .integrations.window import within_window
     thread = get_object_or_404(scoped_threads(request.user), pk=pk)
     analysis = getattr(thread, 'analysis', None)
-    metrics = [evaluate(thread.product, s, scope=companies_for(request.user)) for s in grouped_signals(analysis.signals)] if thread.product_id and analysis else []
+    effective = effective_analysis(thread)
+    metrics = [evaluate(thread.product, s, scope=companies_for(request.user)) for s in grouped_signals(effective.signals)] if thread.product_id and effective else []
     can_reply = request.user.is_superuser or Membership.objects.filter(user=request.user, company=thread.account.company, role__in=OPERATORS).exists()
-    return render(request, 'desk/thread.html', context(request, thread=thread, source_content=content_view(thread), within_sync_window=within_window(thread.received_at), analysis=analysis, metrics=metrics, request_key=str(uuid.uuid4()), can_reply=can_reply, human_only=human_only({'signals': analysis.signals, 'severity': analysis.severity}) if analysis else False, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()))
+    can_assess = request.user.is_superuser or Membership.objects.filter(user=request.user, company=thread.account.company, role__in=set(OPERATORS + QUALITY)).exists()
+    assessment = getattr(thread, 'assessment', None)
+    initial = {'decision': assessment.decision if assessment else 'pending', 'signals': assessment.signals if assessment else grouped_signals(analysis.signals) if analysis else [],
+               'severity': assessment.severity if assessment else analysis.severity if analysis else 'P2', 'objective_issue': assessment.objective_issue if assessment else False,
+               'comment': assessment.comment if assessment else '', 'source_fingerprint': fingerprint(thread), 'assessment_version': assessment.reviewed_at.isoformat() if assessment else ''}
+    restricted = any(human_only({'signals': a.signals, 'severity': a.severity}) for a in [analysis, effective] if a)
+    return render(request, 'desk/thread.html', context(request, thread=thread, source_content=content_view(thread), within_sync_window=within_window(thread.received_at), analysis=analysis, metrics=metrics, request_key=str(uuid.uuid4()), can_reply=can_reply, can_assess=can_assess,
+        assessment_form=assessment_form if assessment_form is not None else ReviewAssessmentForm(initial=initial), assessment=assessment, assessment_current=assessment_is_current(thread),
+        human_only=restricted, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()), status=form_status)
+
+
+@login_required
+@require_POST
+def review_assessment(request, pk):
+    thread = get_object_or_404(scoped_threads(request.user), pk=pk, kind='review')
+    require_role(request.user, thread.account.company_id, list(set(OPERATORS + QUALITY)))
+    form = ReviewAssessmentForm(request.POST)
+    status = 400
+    if form.is_valid():
+        try:
+            assess_review(pk, request.user, form.cleaned_data)
+            messages.success(request, 'Решение сохранено. Показатели учитывают разметку оператора; исходный AI-анализ сохранён.')
+            return redirect('thread', pk=pk)
+        except ValueError as error:
+            form.add_error(None, str(error)); status = 409
+    return thread_detail(request, pk, form, status)
 
 
 @login_required
@@ -102,7 +145,8 @@ def thread_action(request, pk):
             messages.success(request, 'Сверка выполнена. Проверьте обновлённый статус ответа.')
         elif action == 'escalate':
             from .incidents.service import escalate
-            signal = grouped_signals(thread.analysis.signals)[0] if hasattr(thread, 'analysis') and thread.analysis.signals else 'OTHER'
+            effective = effective_analysis(thread)
+            signal = grouped_signals(effective.signals)[0] if effective and effective.signals else 'OTHER'
             incident = escalate(thread, signal, request.user)
             messages.success(request, f'Обращение связано с расследованием #{incident.pk}.')
         elif action == 'status':
@@ -142,8 +186,10 @@ def product_detail(request, pk):
     product_accounts = Account.objects.filter(productmapping__product__in=family).distinct()
     selected_account = request.GET.get('account', '')
     account_id = int(selected_account) if selected_account.isdigit() and product_accounts.filter(pk=int(selected_account)).exists() else None
-    metrics = [evaluate(product, s, window, scope=companies_for(request.user), account_id=account_id) for s in PRODUCT_SIGNALS]
-    summary = review_summary(product, window, scope=companies_for(request.user), account_id=account_id)
+    from .voc.dataset import ControlDataset
+    dataset = ControlDataset([product], companies_for(request.user))
+    metrics = [evaluate(product, s, window, account_id=account_id, dataset=dataset) for s in ['NEGATIVE', *PRODUCT_SIGNALS]]
+    summary = review_summary(product, window, account_id=account_id, dataset=dataset)
     mappings = ProductMapping.objects.filter(product__in=family).select_related('account')
     if account_id is not None: mappings = mappings.filter(account_id=account_id)
     event_filter = Q(pk__in=[])
@@ -160,25 +206,62 @@ def product_detail(request, pk):
     recent_sales = SaleEvent.objects.filter(event_filter, kind='sale', occurred_at__lte=summary['period']['until']).select_related('account').order_by('-occurred_at', '-pk')[:100]
     history = scoped_threads(request.user).filter(product__in=family)
     if account_id is not None: history = history.filter(account_id=account_id)
-    return render(request, 'desk/product.html', context(request, product=product, metrics=metrics, sales=sales, window=window, threads=history[:30], summary=summary, product_accounts=product_accounts, selected_account=str(account_id or ''), recent_sales=recent_sales))
+    baseline = dataset.baselines.get((product.code, 'NEGATIVE'))
+    account_metrics = [{'name': account.name, **evaluate(product, 'NEGATIVE', window, dataset=dataset, account_id=account.pk)} for account in product_accounts]
+    initial = {'warning': baseline.low, 'threshold': baseline.high, 'min_redemptions': baseline.min_redemptions, 'min_signals': baseline.min_signals, 'cluster_count': baseline.cluster_count, 'cluster_days': baseline.cluster_days} if baseline else {}
+    return render(request, 'desk/product.html', context(request, product=product, metrics=metrics, sales=sales, window=window, threads=history[:30], summary=summary, product_accounts=product_accounts, selected_account=str(account_id or ''), recent_sales=recent_sales,
+        can_manage_rules=can_manage_rules(request.user, product), negative_rule=baseline, rule_form=NegativeRuleForm(initial=initial), account_metrics=account_metrics))
+
+
+def can_manage_rules(user, product):
+    if user.is_superuser: return True
+    company_ids = set(product_family(product).values_list('company_id', flat=True))
+    allowed = set(Membership.objects.filter(user=user, role__in=QUALITY).values_list('company_id', flat=True))
+    return company_ids <= allowed
+
+
+@login_required
+@require_POST
+@transaction.atomic
+def product_rules(request, pk):
+    product = get_object_or_404(Product, pk=pk, company__in=companies_for(request.user))
+    if not can_manage_rules(request.user, product): raise PermissionDenied()
+    form = NegativeRuleForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, 'Правило не сохранено. ' + '; '.join(str(e) for errors in form.errors.values() for e in errors))
+        return redirect('product', pk=pk)
+    canonical = product_family(product).order_by('pk').first()
+    data = form.cleaned_data
+    before = Baseline.objects.filter(product=canonical, signal='NEGATIVE').values().first()
+    baseline, _ = Baseline.objects.update_or_create(product=canonical, signal='NEGATIVE', defaults={
+        'low': data['warning'], 'high': data['threshold'], 'min_redemptions': data['min_redemptions'],
+        'min_signals': data['min_signals'], 'cluster_count': data['cluster_count'], 'cluster_days': data['cluster_days'], 'source': 'manual'})
+    Audit.objects.create(company=canonical.company, actor=request.user, action='control.rule', object_id=str(baseline.pk), before=before or {}, after=data)
+    messages.success(request, 'Правило сохранено. Фоновая проверка применит его без отправки ответов покупателям.')
+    return redirect('product', pk=pk)
 
 
 @login_required
 def voc(request):
-    rows = []
-    candidates = Product.objects.filter(company__in=companies_for(request.user), thread__analysis__isnull=False)
+    from .voc.dataset import ControlDataset
+    from .voc.queue import product_queue
+    allowed = companies_for(request.user)
+    incidents = list(visible_incidents(request.user).exclude(status='CLOSED').select_related('product', 'owner').prefetch_related('threads'))
+    candidates = Product.objects.filter(company__in=allowed).filter(Q(thread__kind='review') | Q(code__in=[i.product.code for i in incidents]))
     if request.GET.get('q'):
         candidates = candidates.filter(Q(code__icontains=request.GET['q']) | Q(name__icontains=request.GET['q']))
-    families = candidates.values('code').annotate(product_id=Min('pk'), last_feedback=Max('thread__received_at')).order_by('-last_feedback', 'code')
-    product_page = Paginator(families, 20).get_page(request.GET.get('page'))
-    products = Product.objects.in_bulk([row['product_id'] for row in product_page])
-    for candidate in product_page:
-        product = products[candidate['product_id']]
-        for signal in PRODUCT_SIGNALS:
-            metric = evaluate(product, signal, scope=companies_for(request.user))
-            if metric['count'] or metric['status'] == 'ANOMALY': rows.append({'product': product, **metric})
-    rows.sort(key=lambda x: ({'ANOMALY': 0, 'WATCH': 1, 'NORMAL': 2}[x['status']], -x['count']))
-    return render(request, 'desk/voc.html', context(request, metrics=rows, product_page=product_page, incidents=visible_incidents(request.user).exclude(status='CLOSED').select_related('product')))
+    ids = candidates.values('code').annotate(product_id=Min('pk')).values_list('product_id', flat=True)
+    products = list(Product.objects.filter(pk__in=ids))
+    rows = product_queue(products, ControlDataset(products, allowed), incidents)
+    totals = {'all': len(rows), 'attention': sum(r['attention'] for r in rows), 'incidents': sum(bool(r['incidents']) for r in rows),
+              'insufficient': sum(r['incomplete'] for r in rows), 'pending': sum(r['pending'] > 0 for r in rows)}
+    mode = request.GET.get('filter', 'all')
+    if mode == 'attention': rows = [r for r in rows if r['attention']]
+    elif mode == 'incidents': rows = [r for r in rows if r['incidents']]
+    elif mode == 'insufficient': rows = [r for r in rows if r['incomplete']]
+    elif mode == 'pending': rows = [r for r in rows if r['pending']]
+    page = Paginator(rows, 20).get_page(request.GET.get('page'))
+    return render(request, 'desk/voc.html', context(request, product_page=page, incidents=incidents, totals=totals, queue_filter=mode))
 
 
 @login_required
@@ -236,11 +319,15 @@ def tone(request):
 
 @login_required
 def incident_detail(request, pk):
+    from django.contrib.auth import get_user_model
+    from django.utils.dateparse import parse_datetime
     incident = get_object_or_404(visible_incidents(request.user).select_related('product'), pk=pk)
+    case_companies = set(incident.threads.values_list('account__company_id', flat=True)) | {incident.product.company_id}
+    allowed_companies = set(companies_for(request.user).values_list('pk', flat=True))
+    owners = get_user_model().objects.filter(is_active=True).filter(Q(is_superuser=True) | Q(membership__company_id__in=case_companies & allowed_companies, membership__role__in=QUALITY)).distinct().order_by('username')
+    can_edit = request.user.is_superuser or Membership.objects.filter(user=request.user, role__in=QUALITY, company_id__in=case_companies).exists()
     if request.method == 'POST':
-        if not request.user.is_superuser:
-            allowed = Membership.objects.filter(user=request.user, role__in=QUALITY).values_list('company_id', flat=True)
-            if not incident.threads.filter(account__company_id__in=allowed).exists(): raise PermissionDenied()
+        if not can_edit: raise PermissionDenied()
         try:
             if request.POST.get('action') == 'bitrix':
                 from .incidents.service import sync_bitrix
@@ -250,15 +337,33 @@ def incident_detail(request, pk):
             else:
                 status = request.POST.get('status')
                 if status not in {'INVESTIGATION', 'CAPA', 'CONTROL', 'CLOSED'}: raise ValueError('Неизвестный статус.')
-                before = {k: getattr(incident, k) for k in ['status', 'hypothesis', 'actions', 'result']}
+                if request.POST.get('version') != incident.updated_at.isoformat(): raise ValueError('Расследование изменилось. Обновите страницу перед сохранением.')
+                if status == 'CLOSED' and not request.POST.get('result', '').strip(): raise ValueError('Для закрытия укажите результат проверки.')
+                owner_id = request.POST.get('owner', '')
+                owner = get_object_or_404(owners, pk=owner_id) if owner_id.isdecimal() else None
+                if owner_id and not owner_id.isdecimal(): raise ValueError('Выберите ответственного из списка.')
+                due = parse_datetime(request.POST['due_at']) if request.POST.get('due_at') else None
+                if request.POST.get('due_at') and due is None: raise ValueError('Некорректный срок проверки.')
+                if due and timezone.is_naive(due): due = timezone.make_aware(due)
+                fields = ['status', 'hypothesis', 'actions', 'result', 'owner_id', 'due_at']
+                def values():
+                    return {k: (getattr(incident, k).isoformat() if hasattr(getattr(incident, k), 'isoformat') else getattr(incident, k)) for k in fields}
+                before = values()
                 for field in ['hypothesis', 'actions', 'result']: setattr(incident, field, request.POST.get(field, '')[:12000])
-                incident.status = status
-                incident.save()
-                Audit.objects.create(company=incident.product.company, actor=request.user, action='incident.update', object_id=str(incident.pk), before=before, after={k: getattr(incident, k) for k in before})
+                with transaction.atomic():
+                    locked = Incident.objects.select_for_update().get(pk=incident.pk)
+                    if locked.updated_at != incident.updated_at: raise ValueError('Расследование изменилось. Обновите страницу перед сохранением.')
+                    incident.status, incident.owner, incident.due_at = status, owner, due
+                    incident.save()
+                    Audit.objects.create(company=incident.product.company, actor=request.user, action='incident.update', object_id=str(incident.pk), before=before, after=values())
                 messages.success(request, 'Расследование обновлено.')
         except ValueError as e: messages.error(request, str(e))
         return redirect('incident', pk=pk)
-    return render(request, 'desk/incident.html', context(request, incident=incident, incident_threads=scoped_threads(request.user).filter(incident=incident)))
+    snapshot = incident.opening_snapshot if set(incident.opening_snapshot.get('company_ids', [])) <= allowed_companies else None
+    return render(request, 'desk/incident.html', context(request, incident=incident, incident_threads=scoped_threads(request.user).filter(incident=incident), owners=owners, can_edit=can_edit,
+        snapshot=snapshot, snapshot_start=parse_datetime(snapshot['start']) if snapshot and snapshot.get('start') else None,
+        snapshot_until=parse_datetime(snapshot['until']) if snapshot and snapshot.get('until') else None,
+        snapshot_hidden=bool(incident.opening_snapshot and snapshot is None), incident_statuses=Incident._meta.get_field('status').choices))
 
 
 def visible_incidents(user):
