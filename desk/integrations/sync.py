@@ -71,12 +71,16 @@ def ingest(account, incoming, *, historical=False):
 
 @transaction.atomic
 def ingest_reply(thread, reply, *, allow_reopen=True):
+    allow_reopen = allow_reopen and reply.get('allow_reopen', True)
     revision = hashlib.sha256(reply['text'].encode()).hexdigest()[:16]
     message, created = Message.objects.get_or_create(thread=thread, external_id=(reply['external_id'] + '-' + revision)[:200], direction=reply['direction'], defaults={'text': reply['text'], 'created_at': reply.get('created_at') or timezone.now()})
     if 'source_data' in reply:
         Message.objects.filter(pk=message.pk).update(source_data=reply['source_data'])
     if reply['direction'] == 'out' and reply['published']:
         Outgoing.objects.filter(thread=thread, external_id=reply['external_id'], text=reply['text'], status='Sent').update(status='Confirmed', confirmed_at=timezone.now(), error='')
+    elif reply.get('rejected') and reply['direction'] == 'out':
+        rejected = Outgoing.objects.filter(thread=thread, external_id=reply['external_id'], text=reply['text'], status='Sent').update(status='Failed', retry_safe=True, error='Ответ отклонён модерацией Ozon. Проверьте причину и исправьте текст.')
+        if rejected: Thread.objects.filter(pk=thread.pk).update(status='Ошибка отправки')
     historical = bool(reply.get('created_at') and thread.closed_at and reply['created_at'] <= thread.closed_at)
     if allow_reopen and not historical and created and reply['direction'] == 'in' and thread.status in {'Закрыто', 'Ожидаем клиента', 'Ответ отправлен'}:
         thread.status, thread.closed_at = 'Новое', None
@@ -151,7 +155,8 @@ def sync_account(account):
         retry_at = timezone.now() + timedelta(seconds=max(1, e.retry_after or 60) if isinstance(e, IntegrationError) else 60)
         SyncState.objects.filter(pk=state.pk, lease_token=lease).update(next_attempt=retry_at)
         if isinstance(e, IntegrationError) and e.rate_limited:
-            channel = 'WB' if account.platform == 'wb' else 'Яндекс Маркет'
+            channel = account.get_platform_display()
+            if account.platform == 'wb': channel = 'WB'
             detail = f'Получено: {count}. Пауза {channel}: {detail} Не ранее {timezone.localtime(retry_at):%d.%m %H:%M:%S}.'[:240]
         Account.objects.filter(pk=account.pk).update(sync_status=detail)
         SyncLog.objects.create(account=account, success=False, detail=detail, retry_at=retry_at)

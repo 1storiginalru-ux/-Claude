@@ -286,7 +286,7 @@ def integrations(request):
     from .integrations.window import sync_window
     since, until = sync_window()
     recent = Q(thread__received_at__gte=since, thread__received_at__lte=until)
-    accounts = Account.objects.filter(company__in=companies_for(request.user)).select_related('company', 'sync_state', 'sales_state').prefetch_related('history_states').annotate(total_threads=Count('thread'), sync_threads=Count('thread', filter=recent), full_threads=Count('thread', filter=recent & Q(thread__source_synced_at__isnull=False)), history_threads=Count('thread', filter=recent & Q(thread__history_synced_at__isnull=False)))
+    accounts = Account.objects.filter(company__in=companies_for(request.user)).select_related('company', 'sync_state', 'sales_state').prefetch_related('history_states').annotate(total_threads=Count('thread'), sync_threads=Count('thread', filter=recent), full_threads=Count('thread', filter=recent & Q(thread__source_synced_at__isnull=False)), history_threads=Count('thread', filter=recent & Q(thread__history_synced_at__isnull=False))).order_by('company__name', 'name')
     import os
     from .integrations.base import get_adapter
     rows = [{'account': a, 'has_key': bool(os.environ.get(a.token_env)), 'sales_has_key': bool(os.environ.get(a.sales_token_env or a.token_env)), 'capabilities': get_adapter(a).capabilities, 'next_attempt': a.sync_state.next_attempt if hasattr(a, 'sync_state') else None, 'paused': hasattr(a, 'sync_state') and a.sync_state.next_attempt > timezone.now() and 'Пауза ' in a.sync_status} for a in accounts]

@@ -129,7 +129,8 @@ def save_reviews(account, rows, cursor, adapter, state):
     candidates=[]
     for row in rows:
         if not isinstance(row,dict): raise IntegrationError('Некорректная строка исторического отзыва.')
-        created=source_time(row.get('createdDate' if account.platform=='wb' else 'createdAt'))
+        date_key={'wb':'createdDate','ym':'createdAt','ozon':'published_at'}[account.platform]
+        created=source_time(row.get(date_key))
         if not created or created>timezone.now(): raise IntegrationError('Нет достоверной даты исторического отзыва.')
         incoming=adapter.parse(row,'review')
         if not incoming.external_id or incoming.external_id=='None' or not incoming.sku:
@@ -155,7 +156,12 @@ def save_reviews(account, rows, cursor, adapter, state):
 def reviews_page(account, state, cursor):
     adapter=get_adapter(account)
     since,until=source_time(cursor['since']),source_time(cursor['until'])
-    if account.platform=='ym':
+    if account.platform=='ozon':
+        rows,continuation=adapter.page('review',since,until,cursor)
+        complete=not continuation
+        cursor.pop('last_id',None)
+        cursor.update(continuation)
+    elif account.platform=='ym':
         body={'dateTimeFrom':(since-timedelta(microseconds=1)).isoformat(),'dateTimeTo':(until+timedelta(microseconds=1)).isoformat()}
         params={'limit':50}
         if cursor.get('page_token'): params['page_token']=cursor['page_token']

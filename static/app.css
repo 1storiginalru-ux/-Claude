@@ -13,3 +13,5 @@
 .source-json pre{max-height:350px;overflow:auto;background:var(--bg);padding:15px;border-radius:8px;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}
 
 .assessment-text{margin:16px 0;padding:14px 18px;border-left:3px solid #c7bde7;background:#faf9fd;font-size:13px;line-height:1.7;overflow-wrap:anywhere}
+
+.channel.ozon{color:#1769e8;background:#eaf1ff;font-size:14px}

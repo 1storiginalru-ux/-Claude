@@ -48,6 +48,19 @@ def content_view(thread):
             ('Соответствие размера', data.get('matchingSize')), ('Теги покупателя', data.get('bables')),
             ('Исходный отзыв', data.get('parentFeedbackId')), ('Дополнение к отзыву', data.get('childFeedbackId')),
         ]
+    elif thread.account.platform == 'ozon':
+        parts = [('Комментарий', data.get('text'))]
+        for photo in data.get('photos') or []:
+            full = media_url(mapping(photo).get('url'))
+            if full: photos.append({'url': full, 'preview': full})
+        for video in data.get('videos') or []:
+            value = mapping(video)
+            url = media_url(value.get('url'))
+            if url: videos.append({'url': url, 'preview': media_url(value.get('preview_url')), 'duration': None})
+        pairs = [('SKU Ozon', data.get('sku')), ('Статус на Ozon', data.get('status')),
+                 ('Статус заказа', data.get('order_status')), ('Учитывается в рейтинге', {True:'Да',False:'Нет'}.get(data.get('is_rating_participant'))),
+                 ('Комментариев', data.get('comments_amount')), ('Ответов', data.get('answers_count')),
+                 ('Голосов за', data.get('likes_amount')), ('Голосов против', data.get('dislikes_amount'))]
     else:
         description = mapping(data.get('description'))
         parts = [('Комментарий', description.get('comment')), ('Достоинства', description.get('advantages')), ('Недостатки', description.get('disadvantages'))]

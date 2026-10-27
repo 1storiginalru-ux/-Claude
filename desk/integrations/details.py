@@ -23,13 +23,13 @@ def enrich_account(account, adapter, *, heartbeat=lambda: None, on_change=lambda
                     raise IntegrationError('API вернул другое обращение при запросе по ID.')
                 source_date = incoming.created_at
                 if isinstance(incoming.source_data, dict):
-                    source_date = incoming.source_data.get('createdDate' if account.platform == 'wb' else 'createdAt')
+                    source_date = incoming.source_data.get({'wb':'createdDate','ym':'createdAt','ozon':'published_at'}[account.platform])
                 if not within_window(source_date):
                     raise IntegrationError('Обращение вне периода синхронизации: последние 7 суток.')
                 thread, changed = ingest(account, incoming)
                 thread.account = account
                 on_change(thread, changed)
-            if account.platform == 'ym':
+            if account.platform in {'ym', 'ozon'}:
                 def checkpoint(cursor):
                     Thread.objects.filter(pk=thread.pk).update(history_cursor=cursor)
                     heartbeat()

@@ -22,7 +22,7 @@ def prepare_mapping(upload, bindings, legal_entity, output):
         raise ImportProblem('Один столбец нельзя привязать к нескольким кабинетам.')
     if len({account for _, _, account in bindings}) != len(bindings):
         raise ImportProblem('Один кабинет нельзя указать несколько раз.')
-    if any(platform not in {'WB', 'YM'} or not column or not account or len(account) > 80 for platform, column, account in bindings):
+    if any(platform not in {'WB', 'YM', 'OZON'} or not column or not account or len(account) > 80 for platform, column, account in bindings):
         raise ImportProblem('Проверьте площадку, столбец и имя кабинета.')
     rows = read_table(upload, max_rows=100000, max_uncompressed=30 * 1024 * 1024)
     columns = ['ID', 'Брэнд', 'Товар', 'Тип', 'Объем'] + [column for _, column, _ in bindings]
@@ -44,10 +44,10 @@ def prepare_mapping(upload, bindings, legal_entity, output):
             sku = row[column]
             if not sku:
                 continue
-            if platform == 'WB':
+            if platform in {'WB', 'OZON'}:
                 sku = wb_nm_id(sku)
                 if not sku:
-                    raise ImportProblem(f'Строка {line}, {column}: нужен числовой артикул WB (nmId).')
+                    raise ImportProblem(f'Строка {line}, {column}: нужен числовой артикул площадки: WB nmId или Ozon SKU.')
             if len(sku) > 120:
                 raise ImportProblem(f'Строка {line}, {column}: слишком длинный артикул.')
             if (account, sku) in seen:

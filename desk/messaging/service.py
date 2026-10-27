@@ -12,6 +12,8 @@ MAX_ATTEMPTS = 5
 def enqueue(thread, actor, text, request_key):
     text = text.strip()
     if not 1 <= len(text) <= 5000: raise ValueError('Ответ должен содержать от 1 до 5000 символов.')
+    if thread.account.platform == 'ozon' and not 2 <= len(text) <= 3000:
+        raise ValueError('Ответ Ozon должен содержать от 2 до 3000 символов.')
     try: request_key = uuid.UUID(str(request_key))
     except (ValueError, TypeError, AttributeError) as e: raise ValueError('Некорректный ключ отправки.') from e
     previous = Outgoing.objects.filter(request_key=request_key).first()

@@ -48,14 +48,20 @@ class Adapter:
     def after_response(self, token, response):
         return None
 
+    def request_headers(self, token):
+        return {'Authorization' if self.account.platform == 'wb' else 'Api-Key': token}
+
+    def access_error(self, status):
+        return f'API: HTTP {status}. Проверьте доступ и параметры.'
+
     def request(self, method, path, *, writing=False, **kwargs):
         if not self.account.enabled or self.account.company.is_demo: raise IntegrationError('Кабинет выключен или относится к демо-компании.')
         token = os.environ.get(self.account.token_env)
         if not token: raise IntegrationError('Не задана переменная с API-ключом кабинета.')
-        header = 'Authorization' if self.account.platform == 'wb' else 'Api-Key'
+        headers = self.request_headers(token)
         self.before_request(token)
         try:
-            response = requests.request(method, self.base_url + path, headers={header: token}, timeout=(5, 20), allow_redirects=False, **kwargs)
+            response = requests.request(method, self.base_url + path, headers=headers, timeout=(5, 20), allow_redirects=False, **kwargs)
         except requests.ConnectTimeout as e:
             raise IntegrationError('Тайм-аут подключения.', retryable=True) from e
         except requests.RequestException as e:
@@ -68,7 +74,7 @@ class Adapter:
         if response.status_code >= 500:
             raise IntegrationError(f'API: HTTP {response.status_code}.', retryable=not writing, ambiguous=writing)
         if not 200 <= response.status_code < 300:
-            raise IntegrationError(f'API: HTTP {response.status_code}. Проверьте доступ и параметры.')
+            raise IntegrationError(self.access_error(response.status_code))
         try: payload = response.json() if response.content else {}
         except ValueError as e:
             raise IntegrationError('API вернул некорректный JSON.', ambiguous=writing) from e
@@ -80,6 +86,8 @@ class Adapter:
 def get_adapter(account):
     from .wildberries import Wildberries
     from .yandex import YandexMarket
+    from .ozon import Ozon
     if account.platform == 'wb': return Wildberries(account)
     if account.platform == 'ym': return YandexMarket(account)
+    if account.platform == 'ozon': return Ozon(account)
     raise IntegrationError('Канал не поддерживается.')

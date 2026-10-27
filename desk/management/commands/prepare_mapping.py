@@ -12,13 +12,14 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('file', type=Path)
         parser.add_argument('--wb', action='append', default=[], metavar='СТОЛБЕЦ=КАБИНЕТ')
+        parser.add_argument('--ozon', action='append', default=[], metavar='СТОЛБЕЦ=КАБИНЕТ')
         parser.add_argument('--ym', action='append', default=[], metavar='СТОЛБЕЦ=КАБИНЕТ')
         parser.add_argument('--legal-entity', required=True)
         parser.add_argument('--output', type=Path)
 
     def handle(self, *args, **options):
         bindings = []
-        for platform, key in [('WB', 'wb'), ('YM', 'ym')]:
+        for platform, key in [('WB', 'wb'), ('YM', 'ym'), ('OZON', 'ozon')]:
             for value in options[key]:
                 column, separator, account = value.partition('=')
                 if not separator:

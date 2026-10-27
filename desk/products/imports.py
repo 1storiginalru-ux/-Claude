@@ -68,13 +68,18 @@ def import_mapping(company, upload, actor):
         required(row, ['ProductID', 'Product Name', 'Brand', 'Volume', 'Concentration', 'Platform', 'Account', 'SKU', 'External Product ID', 'Legal Entity'], line)
         account = Account.objects.filter(company=company, name=row['Account']).first()
         if not account: raise ImportProblem(f'Строка {line}: кабинет не принадлежит выбранной компании.')
-        platform = {'wildberries': 'wb', 'wb': 'wb', 'ym': 'ym', 'яндекс маркет': 'ym'}.get(row['Platform'].lower())
+        platform = {'wildberries': 'wb', 'wb': 'wb', 'ym': 'ym', 'яндекс маркет': 'ym', 'ozon':'ozon', 'озон':'ozon'}.get(row['Platform'].lower())
         if platform != account.platform: raise ImportProblem(f'Строка {line}: площадка не совпадает с кабинетом.')
         if platform == 'wb':
             nm_id = wb_nm_id(row['SKU'])
             if not nm_id or nm_id != wb_nm_id(row['External Product ID']):
                 raise ImportProblem(f'Строка {line}: для WB укажите одинаковый числовой артикул WB (nmId) в SKU и External Product ID. Артикул продавца не подходит.')
             row['SKU'] = row['External Product ID'] = nm_id
+        if platform == 'ozon':
+            sku=wb_nm_id(row['SKU'])
+            if not sku or sku != wb_nm_id(row['External Product ID']):
+                raise ImportProblem(f'Строка {line}: для Ozon укажите одинаковый числовой Ozon SKU в SKU и External Product ID, а не offer_id продавца.')
+            row['SKU'] = row['External Product ID'] = sku
         if row['Legal Entity'] != company.legal_entity:
             raise ImportProblem(f'Строка {line}: юридическое лицо не совпадает.')
         key = (account.pk, row['SKU'])

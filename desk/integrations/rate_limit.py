@@ -39,7 +39,7 @@ def scope_for(token, namespace='wb-feedbacks'):
     return hashlib.sha256((namespace + '\0' + token).encode()).hexdigest()
 
 
-def acquire(token, namespace='wb-feedbacks', interval=1):
+def acquire(token, namespace='wb-feedbacks', interval=1, label='WB'):
     from .base import IntegrationError
     scope = scope_for(token, namespace)
     for _ in range(10):
@@ -48,7 +48,7 @@ def acquire(token, namespace='wb-feedbacks', interval=1):
         wait = (state.next_request_at - now).total_seconds()
         if wait > 2:
             raise IntegrationError(
-                f'Пауза WB по лимиту запросов: ещё {math.ceil(wait)} сек.',
+                f'Пауза {label} по лимиту запросов: ещё {math.ceil(wait)} сек.',
                 retryable=True, retry_after=math.ceil(wait), rate_limited=True, request_sent=False,
             )
         if wait > 0:
@@ -57,7 +57,7 @@ def acquire(token, namespace='wb-feedbacks', interval=1):
         # Compare-and-swap also works with SQLite, whose select_for_update is a no-op.
         if ApiThrottle.objects.filter(pk=state.pk, next_request_at=state.next_request_at).update(next_request_at=now + timedelta(seconds=interval)):
             return
-    raise IntegrationError('Канал WB занят другим запросом; следующая попытка отложена.', retryable=True, retry_after=2, rate_limited=True, request_sent=False)
+    raise IntegrationError(f'Канал {label} занят другим запросом; следующая попытка отложена.', retryable=True, retry_after=2, rate_limited=True, request_sent=False)
 
 
 def observe(token, response, namespace='wb-feedbacks', fallback=60, maximum=3600):

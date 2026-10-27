@@ -3,11 +3,14 @@
 set -euo pipefail
 
 voice_purge_demo=0
-if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != '--purge-demo' ]; }; then
-  echo 'Использование: bash deploy/install.sh [--purge-demo]' >&2
-  exit 2
-fi
-if [ "$#" -eq 1 ]; then voice_purge_demo=1; fi
+voice_provision_accounts=0
+for voice_install_option in "$@"; do
+  case "$voice_install_option" in
+    --purge-demo) voice_purge_demo=1 ;;
+    --provision-accounts) voice_provision_accounts=1 ;;
+    *) echo 'Использование: bash deploy/install.sh [--purge-demo] [--provision-accounts]' >&2; exit 2 ;;
+  esac
+done
 
 if [ "$(id -u)" -ne 0 ]; then
   echo 'Запустите установщик через sudo.' >&2
@@ -89,6 +92,7 @@ python3 -m venv /opt/voice/.venv
 install -o root -g root -m 0755 deploy/voice-manage /usr/local/sbin/voice-manage
 install -o root -g root -m 0755 deploy/voice-set-key /usr/local/sbin/voice-set-key
 voice-manage migrate --noinput
+if [ "$voice_provision_accounts" -eq 1 ]; then voice-manage provision_accounts --apply; fi
 if [ "$voice_purge_demo" -eq 1 ]; then voice-manage purge_demo --apply; fi
 voice-manage refresh_rules --apply
 voice-manage collectstatic --noinput

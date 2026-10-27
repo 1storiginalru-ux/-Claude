@@ -50,9 +50,10 @@ class Membership(models.Model):
 class Account(models.Model):
     company = models.ForeignKey(Company, on_delete=models.PROTECT)
     name = models.CharField(max_length=80, unique=True)
-    platform = models.CharField(max_length=10, choices=[('wb', 'Wildberries'), ('ym', 'Яндекс Маркет')])
+    platform = models.CharField(max_length=10, choices=[('wb', 'Wildberries'), ('ym', 'Яндекс Маркет'), ('ozon', 'Ozon')])
     token_env = models.CharField('Имя переменной с API-ключом', max_length=100, validators=[RegexValidator(r'^[A-Z][A-Z0-9_]*$')])
     business_id = models.CharField('Business ID (Яндекс)', max_length=40, blank=True, validators=[RegexValidator(r'^\d*$')])
+    ozon_client_id = models.CharField('Client-Id (Ozon)', max_length=40, blank=True, validators=[RegexValidator(r'^\d*$')])
     enabled = models.BooleanField(default=False)
     sales_enabled = models.BooleanField('Получать продажи WB через API', default=False)
     history_enabled = models.BooleanField('Догружать историю до 100 выкупов', default=True,
@@ -69,6 +70,8 @@ class Account(models.Model):
             raise ValidationError('Для демо-компании внешние интеграции включать нельзя. Создайте реальную компанию.')
         if self.sales_enabled and (self.platform != 'wb' or not self.company_id or self.company.is_demo):
             raise ValidationError('Автоматические продажи пока доступны только для реального кабинета WB.')
+        if self.platform == 'ozon' and self.enabled and not self.ozon_client_id.isdigit():
+            raise ValidationError('Для подключения Ozon укажите числовой Client-Id.')
         if self.pk and Account.objects.filter(pk=self.pk).exclude(company_id=self.company_id).exists() and (self.thread_set.exists() or self.productmapping_set.exists()):
             raise ValidationError('Нельзя менять компанию кабинета с историей или Mapping.')
 
@@ -113,6 +116,12 @@ class ProductMapping(models.Model):
             card = wb_nm_id(self.sku)
             if not card or card != wb_nm_id(self.external_product_id):
                 raise ValidationError('Для WB поля SKU и External product id должны содержать одинаковый числовой артикул WB (nmId).')
+            self.sku = self.external_product_id = card
+        if self.account_id and self.account.platform == 'ozon':
+            from .products.identifiers import wb_nm_id
+            card = wb_nm_id(self.sku)
+            if not card or card != wb_nm_id(self.external_product_id):
+                raise ValidationError('Для Ozon укажите одинаковый числовой Ozon SKU в обоих полях, не offer_id продавца.')
             self.sku = self.external_product_id = card
 
 
@@ -196,7 +205,8 @@ class Message(models.Model):
     @property
     def source_author(self):
         if not isinstance(self.source_data, dict): return ''
-        author = self.source_data.get('author') or self.source_data.get('userName')
+        author = self.source_data.get('author') or self.source_data.get('userName') or self.source_data.get('author_name')
+        if not author and self.source_data.get('is_official') and not self.source_data.get('is_owner'): return 'Ozon'
         return author.get('name', '') if isinstance(author, dict) else (author or '')
 
     class Meta:
