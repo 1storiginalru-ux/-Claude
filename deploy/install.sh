@@ -82,6 +82,7 @@ python3 -m venv /opt/voice/.venv
 install -o root -g root -m 0755 deploy/voice-manage /usr/local/sbin/voice-manage
 install -o root -g root -m 0755 deploy/voice-set-key /usr/local/sbin/voice-set-key
 voice-manage migrate --noinput
+voice-manage refresh_rules --apply
 voice-manage collectstatic --noinput
 voice-manage check
 

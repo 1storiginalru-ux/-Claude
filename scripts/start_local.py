@@ -91,6 +91,7 @@ def main():
     executable = local_python()
     install_dependencies(executable)
     run([executable, ROOT / 'manage.py', 'migrate', '--noinput'])
+    run([executable, ROOT / 'manage.py', 'refresh_rules', '--apply'])
     prepare = [executable, ROOT / 'manage.py', 'prepare_local']
     if options.no_input:
         prepare.append('--no-input')

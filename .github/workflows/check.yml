@@ -68,3 +68,4 @@ jobs:
           desk.tests.test_wb_sales desk.tests.test_product_metrics
           desk.tests.test_coverage
           desk.tests.test_review_control
+          desk.tests.test_classification

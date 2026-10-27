@@ -10,6 +10,7 @@ from .base import IntegrationError, get_adapter
 
 @transaction.atomic
 def ingest(account, incoming):
+    from desk.ai.classification import review_sections
     mappings = ProductMapping.objects.filter(account=account, sku=incoming.sku)
     if account.platform == 'wb' and not account.company.is_demo:
         # Unresolved legacy seller SKUs must never match a coincidentally equal nmId.
@@ -17,6 +18,9 @@ def ingest(account, incoming):
     mapping = mappings.first()
     received = incoming.created_at or timezone.now()
     thread, created = Thread.objects.get_or_create(account=account, kind=incoming.kind, external_id=incoming.external_id, defaults={'text': incoming.text, 'sku': incoming.sku, 'customer': incoming.customer[:120], 'rating': incoming.rating, 'received_at': received, 'due_at': received + timedelta(minutes=account.company.sla_minutes), 'product': mapping.product if mapping else None})
+    thread.account = account
+    old_sections = review_sections(thread)
+    old_context = old_sections or {'advantages': '', 'disadvantages': '', 'comment': thread.text}
     changed = thread.text != incoming.text or thread.rating != incoming.rating
     identity_changed = bool(incoming.sku) and thread.sku != incoming.sku
     if identity_changed or (mapping and thread.product_id is None):
@@ -41,12 +45,28 @@ def ingest(account, incoming):
             updates.update(history_synced_at=now, details_next_attempt=now + timedelta(days=1), details_error='', history_cursor={})
         Thread.objects.filter(pk=thread.pk).update(**updates)
         for key, value in updates.items(): setattr(thread, key, value)
+    new_sections = review_sections(thread)
+    new_context = new_sections or {'advantages': '', 'disadvantages': '', 'comment': thread.text}
+    context_changed = old_context != new_context
+    if old_sections is not None and new_sections is not None and context_changed and not changed:
+        # A customer can move the same word from pros to cons without changing
+        # the flattened text. Preserve the old human decision, but mark it stale.
+        from desk.models import Audit, ReviewAssessment
+        assessment = ReviewAssessment.objects.filter(thread=thread).first()
+        if assessment:
+            Audit.objects.create(company=account.company, action='review.context_changed', object_id=str(thread.pk),
+                before={'source_fingerprint': assessment.source_fingerprint, 'sections': old_sections},
+                after={'source_fingerprint': '0' * 64, 'sections': new_sections})
+            ReviewAssessment.objects.filter(pk=assessment.pk).update(source_fingerprint='0' * 64)
+        if thread.status == 'Закрыто':
+            thread.status, thread.closed_at = 'Новое', None
+            thread.save(update_fields=['status', 'closed_at'])
     revision = hashlib.sha256(incoming.text.encode()).hexdigest()[:24]
     message, _ = Message.objects.get_or_create(thread=thread, external_id='source-' + revision, direction='in', defaults={'text': incoming.text, 'created_at': received})
     if incoming.source_data is not None:
         Message.objects.filter(pk=message.pk).update(source_data=incoming.source_data)
     for reply in incoming.replies: ingest_reply(thread, reply)
-    return thread, created or changed
+    return thread, created or changed or context_changed
 
 
 @transaction.atomic
@@ -98,6 +118,11 @@ def sync_account(account):
             if changed or not hasattr(thread, 'analysis'):
                 try: analyze(thread)
                 except AIProblem: analysis_errors += 1
+            elif thread.analysis.provider == 'rules':
+                from desk.ai.classification import RULES_VERSION
+                if thread.analysis.prompt_version != RULES_VERSION:
+                    from desk.ai.refresh import refresh_rules
+                    refresh_rules(thread.pk, apply=True)
         # Confirm published outgoing replies before spending the budget on history.
         pending = Outgoing.objects.filter(thread__account=account, status='Sent', next_attempt__lte=now).select_related('thread__account__company').order_by('next_attempt')[:20]
         for outgoing in pending:
