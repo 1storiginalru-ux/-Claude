@@ -74,3 +74,4 @@ jobs:
           desk.tests.test_ozon
           desk.tests.test_ym_sales
           desk.tests.test_ai_queue
+          desk.tests.test_ai_profiles

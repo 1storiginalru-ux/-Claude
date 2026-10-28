@@ -310,7 +310,6 @@ def tone(request):
     if request.method == 'POST':
         company = get_object_or_404(companies_for(request.user), pk=request.POST.get('company'))
         require_role(request.user, company.pk, ['supervisor'])
-        before = {'tone_of_voice': company.tone_of_voice, 'knowledge': company.knowledge}
         voice, knowledge = request.POST.get('tone_of_voice', ''), request.POST.get('knowledge', '')
         if request.FILES.get('voice_file'):
             from .ai.documents import extract_voice
@@ -318,12 +317,21 @@ def tone(request):
             except ValueError as e:
                 messages.error(request, str(e))
                 return redirect('tone')
+        if request.FILES.get('knowledge_file'):
+            from .ai.documents import extract_voice
+            try: knowledge = extract_voice(request.FILES['knowledge_file'], max_chars=24000)
+            except ValueError as e:
+                messages.error(request, str(e))
+                return redirect('tone')
         if len(voice) > 16000 or len(knowledge) > 24000:
             messages.error(request, 'Лимиты: Tone of Voice — 16000, знания — 24000 символов.')
         else:
-            company.tone_of_voice, company.knowledge = voice, knowledge
-            company.save(update_fields=['tone_of_voice', 'knowledge'])
-            Audit.objects.create(company=company, actor=request.user, action='tone.update', object_id=str(company.pk), before=before, after={'tone_of_voice': voice, 'knowledge': knowledge})
+            with transaction.atomic():
+                company = Company.objects.select_for_update(no_key=True).get(pk=company.pk)
+                before = {'tone_of_voice': company.tone_of_voice, 'knowledge': company.knowledge}
+                company.tone_of_voice, company.knowledge = voice, knowledge
+                company.save(update_fields=['tone_of_voice', 'knowledge'])
+                Audit.objects.create(company=company, actor=request.user, action='tone.update', object_id=str(company.pk), before=before, after={'tone_of_voice': voice, 'knowledge': knowledge})
             messages.success(request, 'Профиль компании сохранён.')
         return redirect('tone')
     return render(request, 'desk/tone.html', context(request))

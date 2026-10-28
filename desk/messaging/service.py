@@ -1,4 +1,5 @@
 import uuid
+import re
 from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
@@ -8,10 +9,16 @@ from desk.models import Audit, Outgoing, Thread
 MAX_ATTEMPTS = 5
 
 
+def require_completed_template(text):
+    if re.search(r'\{\{[^{}]{1,100}\}\}|\[(?:имя[ _]сотрудника|имя оператора|ФИО)\]', text, re.IGNORECASE):
+        raise ValueError('Замените заполнитель подписи или шаблона реальными данными перед отправкой.')
+
+
 @transaction.atomic
 def enqueue(thread, actor, text, request_key):
     text = text.strip()
     if not 1 <= len(text) <= 5000: raise ValueError('Ответ должен содержать от 1 до 5000 символов.')
+    require_completed_template(text)
     if thread.account.platform == 'ozon' and not 2 <= len(text) <= 3000:
         raise ValueError('Ответ Ozon должен содержать от 2 до 3000 символов.')
     try: request_key = uuid.UUID(str(request_key))
@@ -44,6 +51,9 @@ def process_one():
     if not claimed: return False
     item = Outgoing.objects.select_related('thread__account__company').get(pk=candidate.pk)
     try:
+        try: require_completed_template(item.text)
+        except ValueError as error:
+            raise IntegrationError(str(error), retryable=False, request_sent=False) from error
         external_id = get_adapter(item.thread.account).send(item.thread, item.text)
     except IntegrationError as e:
         if not e.request_sent:
