@@ -31,9 +31,9 @@ if [ -n "$(ss -H -ltn 'sport = :8000')" ]; then
   echo 'Порт 8000 уже занят. Остановите прежний процесс перед установкой Voice.' >&2
   exit 1
 fi
-for service in voice-web voice-worker voice-poll; do
+for service in voice-web voice-worker voice-poll voice-ai; do
   if systemctl is-active --quiet "$service"; then
-    echo 'Сначала остановите службы: systemctl stop voice-web voice-worker voice-poll' >&2
+    echo 'Сначала остановите службы: systemctl stop voice-web voice-worker voice-poll voice-ai' >&2
     exit 1
   fi
 done
@@ -98,7 +98,7 @@ voice-manage refresh_rules --apply
 voice-manage collectstatic --noinput
 voice-manage check
 
-for unit in voice-web.service voice-worker.service voice-poll.service voice-backup.service voice-backup.timer; do
+for unit in voice-web.service voice-worker.service voice-poll.service voice-ai.service voice-backup.service voice-backup.timer; do
   install -o root -g root -m 0644 "deploy/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload

@@ -13,9 +13,12 @@ class Company(models.Model):
     brand = models.CharField('Бренд', max_length=120, blank=True)
     tone_of_voice = models.TextField('Tone of Voice', blank=True)
     knowledge = models.TextField('Подтверждённые знания', blank=True)
-    ai_provider = models.CharField(max_length=20, choices=[('none', 'Не подключён'), ('openai', 'OpenAI'), ('anthropic', 'Anthropic')], default='none')
+    ai_provider = models.CharField(max_length=20, choices=[('none', 'Не подключён'), ('yandex', 'Яндекс AI Studio'), ('openai', 'OpenAI'), ('anthropic', 'Anthropic')], default='none')
     ai_model = models.CharField(max_length=100, blank=True)
     ai_key_env = models.CharField(max_length=100, default='VOC_AI_KEY')
+    ai_folder_id = models.CharField('Каталог Яндекс AI Studio', max_length=100, blank=True)
+    ai_auto_enabled = models.BooleanField('Анализировать новые отзывы автоматически', default=False)
+    ai_token_limit = models.PositiveIntegerField('Лимит AI-токенов в месяц', default=1000000, validators=[MinValueValidator(1)])
     sla_minutes = models.PositiveIntegerField(default=120, validators=[MinValueValidator(1)])
 
     def __str__(self): return self.name
@@ -244,12 +247,70 @@ class Analysis(models.Model):
     provider = models.CharField(max_length=30)
     model = models.CharField(max_length=100, blank=True)
     prompt_version = models.CharField(max_length=30, default='1.0')
+    source_fingerprint = models.CharField(max_length=64, blank=True)
+    evidence = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now=True)
 
     @property
     def grouped_signals(self):
         from .voc.rules import grouped_signals, signal_label
         return [signal_label(signal) for signal in grouped_signals(self.signals)]
+
+
+class KnowledgeEntry(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name='knowledge_entries')
+    product_code = models.CharField('ProductID (пусто — общие знания)', max_length=100, blank=True)
+    title = models.CharField('Название', max_length=200)
+    content = models.TextField('Подтверждённый факт', max_length=3000)
+    source = models.CharField('Источник подтверждения', max_length=500)
+    approved = models.BooleanField('Подтверждено ответственным', default=False)
+    active = models.BooleanField('Использовать', default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['company', 'product_code', 'active'], name='knowledge_scope_idx')]
+
+    def __str__(self): return f'{self.company}: {self.title}'
+
+
+class AIJob(models.Model):
+    STATUSES = [('queued', 'В очереди'), ('running', 'Выполняется'), ('retry', 'Ожидает повтора'),
+                ('done', 'Готово'), ('failed', 'Ошибка — требуется действие'), ('blocked', 'Лимит токенов'), ('cancelled', 'Данные изменились')]
+    thread = models.ForeignKey(Thread, on_delete=models.CASCADE, related_name='ai_jobs')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    source_fingerprint = models.CharField(max_length=64)
+    config_fingerprint = models.CharField(max_length=64)
+    snapshot = models.JSONField(default=dict)
+    classification = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=12, choices=STATUSES, default='queued')
+    attempts = models.PositiveIntegerField(default=0)
+    next_attempt = models.DateTimeField(default=timezone.now)
+    lease_token = models.UUIDField(null=True)
+    lease_until = models.DateTimeField(null=True)
+    error = models.CharField(max_length=300, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['thread', 'source_fingerprint', 'config_fingerprint'], name='ai_job_revision_unique')]
+        indexes = [models.Index(fields=['status', 'next_attempt'], name='ai_job_due_idx')]
+
+
+class AIRequest(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.PROTECT)
+    job = models.ForeignKey(AIJob, on_delete=models.SET_NULL, null=True, related_name='requests')
+    month = models.DateField()
+    stage = models.CharField(max_length=20)
+    provider = models.CharField(max_length=20)
+    model = models.CharField(max_length=100)
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    budget_tokens = models.PositiveIntegerField()
+    state = models.CharField(max_length=12, default='reserved', choices=[('reserved', 'Зарезервировано'), ('confirmed', 'По usage API'), ('uncertain', 'Расход не подтверждён'), ('rejected', 'Запрос отклонён')])
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['company', 'month'], name='ai_request_month_idx')]
 
 
 class Baseline(models.Model):

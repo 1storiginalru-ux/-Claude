@@ -1,0 +1,5 @@
+{% if ai_job %}<section class="panel padded"><div class="section-heading"><h2>AI-анализ</h2><span class="pill neutral">{{ ai_job.get_status_display }}</span></div>
+{% if not analysis_current %}<div class="notice warning">Отзыв или товар изменились. Предыдущий анализ не участвует в расчётах; запустите анализ новой версии.</div>{% endif %}
+{% if ai_job.error %}<p>{{ ai_job.error }}</p>{% elif ai_job.status != 'done' %}<p>Обработка идёт в фоне. Обновите страницу, чтобы увидеть результат.</p>{% else %}<p>Результат сохранён. Решение оператора имеет приоритет. Публикацию ответа подтверждает сотрудник.</p>{% endif %}
+{% if ai_job.status == 'retry' or ai_job.status == 'blocked' %}<p class="muted">Следующая попытка: {{ ai_job.next_attempt|date:'d.m.Y H:i' }}.</p>{% endif %}
+{% if analysis.evidence.facts %}<details><summary>Факты, переданные для подготовки ответа</summary>{% for fact in analysis.evidence.facts %}<p>{{ fact.text|linebreaksbr }}<br><small>{{ fact.source }}</small></p>{% endfor %}</details>{% endif %}<a href="{% url 'ai_queue' %}">Очередь анализа →</a></section>{% endif %}

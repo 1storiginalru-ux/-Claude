@@ -27,7 +27,11 @@ def effective_analysis(thread):
             severity=assessment.severity, objective_issue=assessment.objective_issue,
             provider='human', confidence=1, requires_human=True,
         )
-    return getattr(thread, 'analysis', None)
+    analysis = getattr(thread, 'analysis', None)
+    if analysis and analysis.source_fingerprint:
+        from desk.ai.context import source_digest
+        if analysis.source_fingerprint != source_digest(thread): return None
+    return analysis
 
 
 @transaction.atomic

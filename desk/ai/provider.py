@@ -37,6 +37,7 @@ def request_analysis(thread):
     company = thread.account.company
     sections = review_sections(thread)
     if company.ai_provider == 'none': return local_classify(thread.text, thread.rating, sections=sections, kind=thread.kind), 'rules'
+    if company.ai_provider == 'yandex': raise AIProblem('Анализ Яндекса запускается через очередь AI.')
     key = os.environ.get(company.ai_key_env)
     if not key or not company.ai_model: raise AIProblem('Не настроены AI-модель или переменная с ключом.')
     system = (
@@ -80,7 +81,7 @@ def analyze(thread, actor=None):
     with transaction.atomic():
         before = Analysis.objects.filter(thread=thread).values('sentiment', 'hidden_negative', 'signals', 'severity', 'objective_issue', 'requires_human', 'confidence', 'summary', 'draft', 'provider', 'model').first()
         version = RULES_VERSION if provider == 'rules' else PROMPT_VERSION
-        result, _ = Analysis.objects.update_or_create(thread=thread, defaults={**data, 'provider': provider, 'model': thread.account.company.ai_model if provider != 'rules' else '', 'prompt_version': version})
+        result, _ = Analysis.objects.update_or_create(thread=thread, defaults={**data, 'provider': provider, 'model': thread.account.company.ai_model if provider != 'rules' else '', 'prompt_version': version, 'source_fingerprint': '', 'evidence': {}})
         Audit.objects.create(company=thread.account.company, actor=actor, action='analysis.create', object_id=str(thread.pk), before=before or {}, after={**data, 'provider': provider, 'model': result.model, 'prompt_version': version})
     from desk.incidents.service import evaluate_incidents
     evaluate_incidents(thread, actor=actor)

@@ -8,6 +8,7 @@
 <span class="nav-label">УПРАВЛЕНИЕ</span>
 <a class="{% if request.resolver_match.url_name == 'integrations' %}active{% endif %}" href="{% url 'integrations' %}"><span>⌘</span>Интеграции</a>
 <a class="{% if request.resolver_match.url_name == 'tone' %}active{% endif %}" href="{% url 'tone' %}"><span>≋</span>Tone of Voice</a>
+<a class="{% if request.resolver_match.url_name == 'ai_queue' %}active{% endif %}" href="{% url 'ai_queue' %}"><span>✧</span>Очередь AI</a>
 {% if user.is_superuser %}<a href="/admin/auth/user/"><span>♧</span>Пользователи и команды</a><a href="/admin/"><span>⚙</span>Настройки</a>{% endif %}
 </nav><div class="sidebar-bottom"><div class="help-card"><b>Каждое сообщение — сигнал</b><p>Но не каждый сигнал — проблема.</p><a href="{% url 'voc' %}">Перейти к аналитике ↗</a></div><div class="profile"><span class="avatar">{{ user.username|first|upper }}</span><div><b>{{ user.get_full_name|default:user.username }}</b><small>{% if user.is_superuser %}Администратор{% else %}Сотрудник{% endif %}</small></div><form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="icon-button" title="Выйти">↪</button></form></div></div></aside>
 <div class="main"><header class="topbar"><span>Рабочее пространство <span class="slash">/</span> <strong>{% block breadcrumb %}Inbox{% endblock %}</strong></span><div>{% if has_demo %}<span class="pill neutral">Демо-данные</span>{% endif %}<span class="top-date">{% now 'd E Y' %}</span></div></header><main>

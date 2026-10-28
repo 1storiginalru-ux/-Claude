@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import YandexOrderState
+from .models import YandexOrderState, KnowledgeEntry, AIJob, AIRequest
 from django.forms.models import model_to_dict
 from .models import Account, Analysis, Audit, Baseline, Company, HistorySyncState, Incident, Membership, Message, Outgoing, Product, ProductMapping, ReviewAssessment, SaleEvent, SalesSyncState, SalesDaily, SyncLog, Team, Thread
 
@@ -19,6 +19,14 @@ class AuditedAdmin(admin.ModelAdmin):
 @admin.register(Company)
 class CompanyAdmin(AuditedAdmin):
     list_display = ['name', 'legal_entity', 'brand', 'ai_provider']
+
+
+@admin.register(KnowledgeEntry)
+class KnowledgeAdmin(AuditedAdmin):
+    list_display = ['title', 'company', 'product_code', 'approved', 'active', 'updated_at']
+    list_filter = ['company', 'approved', 'active']
+    search_fields = ['title', 'product_code', 'content']
+    readonly_fields = ['updated_at']
 
 
 @admin.register(Account)
@@ -63,6 +71,8 @@ admin.site.register(SalesSyncState, ReadOnlyAdmin)
 admin.site.register(HistorySyncState, ReadOnlyAdmin)
 admin.site.register(YandexOrderState, ReadOnlyAdmin)
 admin.site.register(ReviewAssessment, ReadOnlyAdmin)
+admin.site.register(AIJob, ReadOnlyAdmin)
+admin.site.register(AIRequest, ReadOnlyAdmin)
 
 
 @admin.register(Audit)

@@ -1,0 +1,26 @@
+[Unit]
+Description=Voice AI classification and draft queue
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=voice
+Group=voice-app
+WorkingDirectory=/opt/voice
+EnvironmentFile=/etc/voice/voice.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/voice/.venv/bin/python manage.py ai_worker
+KillSignal=SIGINT
+TimeoutStopSec=150
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/voice
+
+[Install]
+WantedBy=multi-user.target

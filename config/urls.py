@@ -24,5 +24,6 @@ urlpatterns = [
     path('imports/', views.imports, name='imports'),
     path('integrations/', views.integrations, name='integrations'),
     path('tone/', views.tone, name='tone'),
+    path('ai/', views.ai_queue, name='ai_queue'),
     path('incidents/<int:pk>/', views.incident_detail, name='incident'),
 ] + staticfiles_urlpatterns()

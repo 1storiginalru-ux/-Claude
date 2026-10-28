@@ -30,7 +30,7 @@ def matches(signals, signal):
 
 
 def human_only(result):
-    return result['severity'] == 'P0' or any(s.startswith('AUTH') or s in {'LONG_AUTH', 'RETURN', 'MARK'} or (s == 'DEFECT' and result['severity'] in {'P0', 'P1'}) for s in result['signals'])
+    return result['severity'] == 'P0' or any(s.startswith('AUTH') or s in {'LONG', 'LONG_AUTH', 'RETURN', 'MARK'} or (s == 'DEFECT' and result['severity'] in {'P0', 'P1'}) for s in result['signals'])
 
 
 def is_negative(analysis):

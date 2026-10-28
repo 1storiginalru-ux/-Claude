@@ -19,9 +19,9 @@ class Command(BaseCommand):
         def stop(signum, frame): raise KeyboardInterrupt
         previous = signal.signal(signal.SIGTERM, stop)
         try:
-            for command in [['runserver', '--insecure', '--noreload', f'127.0.0.1:{port}'], ['worker'], ['sync_channels', '--loop']]:
+            for command in [['runserver', '--insecure', '--noreload', f'127.0.0.1:{port}'], ['worker'], ['ai_worker'], ['sync_channels', '--loop']]:
                 children.append(subprocess.Popen(prefix + command, cwd=settings.BASE_DIR))
-            self.stdout.write('HTTP, worker и polling запущены. Ctrl+C завершает только эти процессы.')
+            self.stdout.write('HTTP, worker, AI и polling запущены. Ctrl+C завершает только эти процессы.')
             while True:
                 for process in children:
                     if process.poll() is not None: raise CommandError('Один из процессов завершился; остальные остановлены.')

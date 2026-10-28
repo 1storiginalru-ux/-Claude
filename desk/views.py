@@ -73,6 +73,8 @@ def thread_detail(request, pk, assessment_form=None, form_status=200):
     from .integrations.window import within_window
     thread = get_object_or_404(scoped_threads(request.user), pk=pk)
     analysis = getattr(thread, 'analysis', None)
+    from .ai.context import source_digest
+    analysis_current = not analysis or not analysis.source_fingerprint or analysis.source_fingerprint == source_digest(thread)
     effective = effective_analysis(thread)
     metrics = [evaluate(thread.product, s, scope=companies_for(request.user)) for s in grouped_signals(effective.signals)] if thread.product_id and effective else []
     can_reply = request.user.is_superuser or Membership.objects.filter(user=request.user, company=thread.account.company, role__in=OPERATORS).exists()
@@ -82,9 +84,10 @@ def thread_detail(request, pk, assessment_form=None, form_status=200):
                'severity': assessment.severity if assessment else analysis.severity if analysis else 'P2', 'objective_issue': assessment.objective_issue if assessment else False,
                'comment': assessment.comment if assessment else '', 'source_fingerprint': fingerprint(thread), 'assessment_version': assessment.reviewed_at.isoformat() if assessment else ''}
     restricted = any(human_only({'signals': a.signals, 'severity': a.severity}) for a in [analysis, effective] if a)
+    ai_job = thread.ai_jobs.order_by('-created_at', '-pk').first()
     return render(request, 'desk/thread.html', context(request, thread=thread, source_content=content_view(thread), within_sync_window=within_window(thread.received_at), analysis=analysis, metrics=metrics, request_key=str(uuid.uuid4()), can_reply=can_reply, can_assess=can_assess,
         assessment_form=assessment_form if assessment_form is not None else ReviewAssessmentForm(initial=initial), assessment=assessment, assessment_current=assessment_is_current(thread),
-        human_only=restricted, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()), status=form_status)
+        ai_job=ai_job, analysis_current=analysis_current, human_only=restricted, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()), status=form_status)
 
 
 @login_required
@@ -125,9 +128,14 @@ def thread_action(request, pk):
     action = request.POST.get('action')
     try:
         if action == 'analyze':
-            from .ai.provider import analyze
-            result = analyze(thread, request.user)
-            messages.success(request, 'AI-анализ обновлён.' if result.provider != 'rules' else 'Выполнена предварительная разметка по правилам. AI не подключён.')
+            if thread.account.company.ai_provider == 'none':
+                from .ai.provider import analyze
+                analyze(thread, request.user)
+                messages.success(request, 'Выполнена предварительная разметка по правилам. AI не подключён.')
+            else:
+                from .ai.queue import enqueue
+                job = enqueue(thread, request.user, retry_failed=True)
+                messages.success(request, 'Анализ этой версии уже готов.' if job.status == 'done' else 'AI-анализ поставлен в очередь. Результат появится после обработки.')
         elif action == 'send':
             from .messaging.service import enqueue
             enqueue(thread, request.user, request.POST.get('text', ''), request.POST.get('request_key'))
@@ -319,6 +327,19 @@ def tone(request):
             messages.success(request, 'Профиль компании сохранён.')
         return redirect('tone')
     return render(request, 'desk/tone.html', context(request))
+
+
+@login_required
+def ai_queue(request):
+    from .models import AIJob, AIRequest
+    scope = companies_for(request.user)
+    jobs = AIJob.objects.filter(thread__account__company__in=scope).select_related('thread__account__company', 'thread__product').order_by('-updated_at', '-pk')
+    if request.GET.get('status') in dict(AIJob.STATUSES): jobs = jobs.filter(status=request.GET['status'])
+    page = Paginator(jobs, 40).get_page(request.GET.get('page'))
+    spent = AIRequest.objects.filter(company__in=scope, month=timezone.localdate().replace(day=1)).values('company_id').annotate(tokens=Sum('budget_tokens'), input=Sum('input_tokens'), output=Sum('output_tokens'))
+    totals = {row['company_id']: row for row in spent}
+    settings = [{'company': c, 'usage': totals.get(c.pk, {})} for c in scope]
+    return render(request, 'desk/ai_queue.html', context(request, ai_jobs=page, ai_settings=settings, ai_statuses=AIJob.STATUSES))
 
 
 @login_required

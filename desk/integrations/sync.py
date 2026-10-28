@@ -119,6 +119,23 @@ def sync_account(account):
         from desk.ai.provider import analyze, AIProblem
         def ensure_analysis(thread, changed):
             nonlocal analysis_errors
+            company = account.company
+            if company.ai_provider != 'none':
+                # Polling never waits for a model. Auto work is opt-in; historical
+                # imports use local rules and need a separately selected batch.
+                from desk.models import Analysis
+                needs_analysis = changed or not hasattr(thread, 'analysis')
+                if needs_analysis:
+                    from desk.ai.classification import local_classify, review_sections, RULES_VERSION
+                    defaults = local_classify(thread.text, thread.rating, sections=review_sections(thread), kind=thread.kind)
+                    Analysis.objects.update_or_create(thread=thread, defaults={**defaults, 'provider': 'rules', 'model': '',
+                        'prompt_version': RULES_VERSION, 'source_fingerprint': '', 'evidence': {}})
+                if company.ai_auto_enabled and needs_analysis:
+                    try:
+                        from desk.ai.queue import enqueue
+                        enqueue(thread)
+                    except AIProblem: analysis_errors += 1
+                return
             if changed or not hasattr(thread, 'analysis'):
                 try: analyze(thread)
                 except AIProblem: analysis_errors += 1
