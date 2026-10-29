@@ -73,8 +73,9 @@ def thread_detail(request, pk, assessment_form=None, form_status=200):
     from .integrations.window import within_window
     thread = get_object_or_404(scoped_threads(request.user), pk=pk)
     analysis = getattr(thread, 'analysis', None)
-    from .ai.context import source_digest
+    from .ai.context import source_digest, draft_is_current
     analysis_current = not analysis or not analysis.source_fingerprint or analysis.source_fingerprint == source_digest(thread)
+    draft_current = draft_is_current(thread, analysis)
     effective = effective_analysis(thread)
     metrics = [evaluate(thread.product, s, scope=companies_for(request.user)) for s in grouped_signals(effective.signals)] if thread.product_id and effective else []
     can_reply = request.user.is_superuser or Membership.objects.filter(user=request.user, company=thread.account.company, role__in=OPERATORS).exists()
@@ -87,7 +88,7 @@ def thread_detail(request, pk, assessment_form=None, form_status=200):
     ai_job = thread.ai_jobs.order_by('-created_at', '-pk').first()
     return render(request, 'desk/thread.html', context(request, thread=thread, source_content=content_view(thread), within_sync_window=within_window(thread.received_at), analysis=analysis, metrics=metrics, request_key=str(uuid.uuid4()), can_reply=can_reply, can_assess=can_assess,
         assessment_form=assessment_form if assessment_form is not None else ReviewAssessmentForm(initial=initial), assessment=assessment, assessment_current=assessment_is_current(thread),
-        ai_job=ai_job, analysis_current=analysis_current, human_only=restricted, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()), status=form_status)
+        ai_job=ai_job, analysis_current=analysis_current, draft_current=draft_current, human_only=restricted, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()), status=form_status)
 
 
 @login_required

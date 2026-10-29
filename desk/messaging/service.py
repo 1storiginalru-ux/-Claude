@@ -10,8 +10,10 @@ MAX_ATTEMPTS = 5
 
 
 def require_completed_template(text):
-    if re.search(r'\{\{[^{}]{1,100}\}\}|\[(?:имя[ _]сотрудника|имя оператора|ФИО)\]', text, re.IGNORECASE):
+    if re.search(r'\{\{[\s\S]*?\}\}|\[(?:имя[ _]сотрудника|имя оператора|ФИО)\]', text, re.IGNORECASE):
         raise ValueError('Замените заполнитель подписи или шаблона реальными данными перед отправкой.')
+    if re.search(r'не подтверждено\s*[—–-]\s*уточнить у ответственного', text, re.IGNORECASE):
+        raise ValueError('Уберите внутреннюю пометку из текста для клиента и проверьте недостающие сведения.')
 
 
 @transaction.atomic

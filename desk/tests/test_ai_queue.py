@@ -73,29 +73,31 @@ class AIQueueTests(AIConfiguredCase):
         self.assertFalse(process_one()); self.assertEqual(post.call_count, 2)
 
     @patch('desk.ai.queue.complete')
-    def test_long_and_auth_are_human_only_even_if_model_requests_a_draft(self, post):
+    def test_long_and_auth_get_reviewable_drafts_without_publishing(self, post):
         for signal in ['LONG', 'AUTH-UNKNOWN', 'RETURN', 'MARK']:
             with self.subTest(signal=signal):
                 self.thread.text = 'Не стойкий'; self.thread.save()
                 self.company.ai_model += 'x'; self.company.save()
-                post.reset_mock(); post.side_effect = [self.answer({**NEGATIVE, 'signals': [signal]})]
+                post.reset_mock(); self.responses(post, classification={**NEGATIVE, 'signals': [signal]})
                 enqueue(self.thread); process_one()
-                self.assertEqual(post.call_count, 1)
+                self.assertEqual(post.call_count, 2)
                 result = Analysis.objects.get(thread=self.thread)
-                self.assertEqual(result.draft, ''); self.assertTrue(result.requires_human)
+                self.assertTrue(result.draft); self.assertTrue(result.requires_human)
+                self.assertTrue(result.evidence['operator_notes']); self.assertFalse(Outgoing.objects.exists())
 
     @patch('desk.ai.queue.complete')
     def test_model_disagreement_with_strong_local_issue_requires_review(self, post):
         self.thread.text = 'Это подделка'; self.thread.save()
-        post.return_value = self.answer(POSITIVE)
+        self.responses(post)
         enqueue(self.thread); process_one()
         result = Analysis.objects.get(thread=self.thread)
-        self.assertLess(result.confidence, 0.7); self.assertEqual(result.draft, '')
-        self.assertEqual(post.call_count, 1)
+        self.assertLess(result.confidence, 0.7); self.assertTrue(result.draft)
+        self.assertTrue(result.requires_human); self.assertEqual(post.call_count, 2)
+        self.assertFalse(Outgoing.objects.exists())
 
     @patch('desk.ai.queue.complete')
     def test_high_rating_complaint_is_hidden_negative(self, post):
-        post.return_value = self.answer(NEGATIVE)
+        self.responses(post, classification=NEGATIVE)
         enqueue(self.thread); process_one()
         self.assertTrue(Analysis.objects.get(thread=self.thread).hidden_negative)
 
@@ -168,14 +170,15 @@ class AIQueueTests(AIConfiguredCase):
 
     @patch('desk.ai.queue.complete')
     def test_missing_usage_keeps_a_conservative_budget_reservation(self, post):
-        post.return_value = (json.dumps(NEGATIVE), None, True)
+        post.side_effect = [(json.dumps(NEGATIVE), None, True), (json.dumps({'draft': 'Здравствуйте! Поможем разобраться.', 'used_fact_ids': []}), None, True)]
         enqueue(self.thread); process_one()
-        call = AIRequest.objects.get()
-        self.assertEqual(call.state, 'uncertain'); self.assertGreater(call.budget_tokens, 1000)
+        self.assertEqual(AIRequest.objects.count(), 2)
+        for call in AIRequest.objects.all():
+            self.assertEqual(call.state, 'uncertain'); self.assertGreater(call.budget_tokens, 1000)
 
     @patch('desk.ai.queue.complete')
     def test_interrupted_worker_is_recovered_without_losing_reservations(self, post):
-        post.return_value = self.answer(NEGATIVE)
+        self.responses(post, classification=NEGATIVE)
         job = enqueue(self.thread)
         AIJob.objects.filter(pk=job.pk).update(status='running', lease_until=timezone.now() - timedelta(seconds=1), attempts=1)
         AIRequest.objects.create(company=self.company, job=job, month=timezone.localdate().replace(day=1),
@@ -208,7 +211,7 @@ class AIQueueTests(AIConfiguredCase):
     @patch('desk.ai.queue.complete')
     def test_human_verdict_has_priority_over_completed_ai_job(self, post):
         human = self.assess()
-        post.return_value = self.answer(NEGATIVE)
+        self.responses(post, classification=NEGATIVE)
         enqueue(self.thread); process_one()
         self.thread.refresh_from_db()
         self.assertEqual(effective_analysis(self.thread).provider, 'human')
@@ -223,7 +226,7 @@ class AIQueueTests(AIConfiguredCase):
 
     @patch('desk.ai.queue.complete')
     def test_text_change_invalidates_previous_model_analysis(self, post):
-        post.return_value = self.answer(NEGATIVE)
+        self.responses(post, classification=NEGATIVE)
         enqueue(self.thread); process_one()
         self.thread.text = 'Новая версия'; self.thread.save(); self.thread.refresh_from_db()
         self.assertIsNone(effective_analysis(self.thread))
@@ -405,4 +408,4 @@ class AIBudgetConcurrencyTests(TransactionTestCase):
                     second.refresh_from_db(); self.assertEqual(second.status, 'blocked')
                 finally: release.set()
                 self.assertTrue(result.result(timeout=10)); self.assertEqual(post.call_count, 1)
-        first.refresh_from_db(); self.assertEqual(first.status, 'done')
+        first.refresh_from_db(); self.assertEqual(first.status, 'blocked'); self.assertTrue(first.classification)
