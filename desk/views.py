@@ -36,6 +36,8 @@ def context(request, **kwargs):
 def inbox(request):
     base = scoped_threads(request.user)
     threads = base
+    from .replies.views import filter_dates
+    threads = filter_dates(request,threads,'received_at')
     q = request.GET.get('q', '').strip()
     if q: threads = threads.filter(Q(text__icontains=q) | Q(product__name__icontains=q) | Q(customer__icontains=q) | Q(product__code__icontains=q))
     if request.GET.get('product_code'): threads = threads.filter(product__code=request.GET['product_code'])
@@ -76,6 +78,12 @@ def thread_detail(request, pk, assessment_form=None, form_status=200):
     from .ai.context import source_digest, draft_is_current
     analysis_current = not analysis or not analysis.source_fingerprint or analysis.source_fingerprint == source_digest(thread)
     draft_current = draft_is_current(thread, analysis)
+    reply_draft = (get_object_or_404(thread.reply_drafts,pk=request.GET['draft']) if request.GET.get('draft') else thread.reply_drafts.order_by('-pk').first())
+    if reply_draft:
+        from .replies.service import draft_current as current_reply
+        draft_current = current_reply(reply_draft)
+    composer_text = (reply_draft.text if reply_draft else analysis.draft if analysis else '') if draft_current else ''
+    draft_notes = reply_draft.notes if reply_draft else (analysis.evidence.get('operator_notes',[]) if analysis else [])
     effective = effective_analysis(thread)
     metrics = [evaluate(thread.product, s, scope=companies_for(request.user)) for s in grouped_signals(effective.signals)] if thread.product_id and effective else []
     can_reply = request.user.is_superuser or Membership.objects.filter(user=request.user, company=thread.account.company, role__in=OPERATORS).exists()
@@ -88,7 +96,10 @@ def thread_detail(request, pk, assessment_form=None, form_status=200):
     ai_job = thread.ai_jobs.order_by('-created_at', '-pk').first()
     return render(request, 'desk/thread.html', context(request, thread=thread, source_content=content_view(thread), within_sync_window=within_window(thread.received_at), analysis=analysis, metrics=metrics, request_key=str(uuid.uuid4()), can_reply=can_reply, can_assess=can_assess,
         assessment_form=assessment_form if assessment_form is not None else ReviewAssessmentForm(initial=initial), assessment=assessment, assessment_current=assessment_is_current(thread),
-        ai_job=ai_job, analysis_current=analysis_current, draft_current=draft_current, human_only=restricted, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()), status=form_status)
+        ai_job=ai_job, analysis_current=analysis_current, draft_current=draft_current, composer_text=composer_text, reply_draft=reply_draft,
+        draft_notes=draft_notes, draft_variants=thread.reply_drafts.order_by('-pk')[:10],
+        draft_history=Audit.objects.filter(company=thread.account.company,action='reply.draft.saved',object_id=str(reply_draft.pk)).order_by('-created_at')[:10] if reply_draft else [],
+        human_only=restricted, statuses=Thread.STATUSES, operators=Membership.objects.filter(company=thread.account.company, role__in=OPERATORS).select_related('user'), active_outgoing=thread.outgoing.filter(status__in=['Queued', 'Sending', 'Sent']).exists()), status=form_status)
 
 
 @login_required
@@ -128,7 +139,26 @@ def thread_action(request, pk):
     require_role(request.user, thread.account.company_id, OPERATORS)
     action = request.POST.get('action')
     try:
-        if action == 'analyze':
+        if action in {'prepare_reply','another_reply'}:
+            from .replies.service import prepare_reply
+            prepare_reply(thread,request.user,another=action=='another_reply')
+            messages.success(request,'Подготовка запущена. Готовый шаблон появится сразу, AI-черновик — после обработки очереди.')
+        elif action == 'save_draft':
+            from .replies.service import save_draft
+            save_draft(thread,request.user,request.POST.get('text',''),draft_id=request.POST.get('reply_draft',''),version=request.POST.get('draft_version',''),feedback=request.POST.get('feedback','unreviewed'),comment=request.POST.get('feedback_comment',''))
+            messages.success(request,'Черновик сохранён. Ответ клиенту не отправлен.')
+        elif action == 'propose_example':
+            from .replies.service import propose_example
+            propose_example(thread,request.user,request.POST.get('text',''))
+            messages.success(request,'Пример передан на проверку руководителю. До подтверждения AI его не использует.')
+        elif action == 'add_test':
+            from .models import ReplyTestCase
+            from .replies.service import case_sections
+            require_role(request.user,thread.account.company_id,['supervisor','quality'])
+            case,_=ReplyTestCase.objects.get_or_create(source_thread=thread,defaults={'account':thread.account,'product':thread.product,'kind':thread.kind,'text':thread.text,'rating':thread.rating,'review_sections':case_sections(thread),'title':f'Обращение №{thread.pk}','created_by':request.user})
+            messages.success(request,'Случай сохранён в испытаниях. AI ещё не вызывался.')
+            return redirect('reply_tests')
+        elif action == 'analyze':
             if thread.account.company.ai_provider == 'none':
                 from .ai.provider import analyze
                 analyze(thread, request.user)
@@ -139,7 +169,19 @@ def thread_action(request, pk):
                 messages.success(request, 'Анализ этой версии уже готов.' if job.status == 'done' else 'AI-анализ поставлен в очередь. Результат появится после обработки.')
         elif action == 'send':
             from .messaging.service import enqueue
-            enqueue(thread, request.user, request.POST.get('text', ''), request.POST.get('request_key'))
+            if request.POST.get('feedback')=='rejected': raise ValueError('Черновик отмечен как неподходящий. Исправьте текст и результат проверки перед отправкой.')
+            with transaction.atomic():
+                item=enqueue(thread, request.user, request.POST.get('text', ''), request.POST.get('request_key'))
+                if request.POST.get('reply_draft'):
+                    from .replies.service import save_draft
+                    from .models import ReplyDraft
+                    linked=ReplyDraft.objects.filter(pk=request.POST['reply_draft'],thread=thread,outgoing=item).exists()
+                    if not linked:
+                        feedback=request.POST.get('feedback','unreviewed')
+                        draft=save_draft(thread,request.user,request.POST.get('text',''),draft_id=request.POST['reply_draft'],version=request.POST.get('draft_version',''),feedback='accepted' if feedback=='unreviewed' else feedback,comment=request.POST.get('feedback_comment',''))
+                        draft.outgoing=item;draft.save(update_fields=['outgoing','updated_at'])
+                        item.ai_draft=draft.original_text;item.save(update_fields=['ai_draft'])
+                        Audit.objects.create(company=thread.account.company,actor=request.user,action='outgoing.draft.selected',object_id=str(item.pk),after={'draft':draft.pk,'original_text':draft.original_text})
             messages.success(request, 'Ответ сохранён в очереди. Статус публикации появится после обработки worker.')
         elif action == 'retry':
             from .messaging.service import retry
@@ -312,6 +354,7 @@ def tone(request):
         company = get_object_or_404(companies_for(request.user), pk=request.POST.get('company'))
         require_role(request.user, company.pk, ['supervisor'])
         voice, knowledge = request.POST.get('tone_of_voice', ''), request.POST.get('knowledge', '')
+        working = request.POST.get('ai_working_style', company.ai_working_style)
         if request.FILES.get('voice_file'):
             from .ai.documents import extract_voice
             try: voice = extract_voice(request.FILES['voice_file'])
@@ -324,15 +367,21 @@ def tone(request):
             except ValueError as e:
                 messages.error(request, str(e))
                 return redirect('tone')
-        if len(voice) > 16000 or len(knowledge) > 24000:
-            messages.error(request, 'Лимиты: Tone of Voice — 16000, знания — 24000 символов.')
+        if request.FILES.get('working_style_file'):
+            from .ai.documents import extract_voice
+            try: working = extract_voice(request.FILES['working_style_file'],max_chars=5000)
+            except ValueError as error:
+                messages.error(request,str(error));return redirect('tone')
+        if len(voice) > 16000 or len(knowledge) > 24000 or len(working)>5000:
+            messages.error(request, 'Лимиты: Tone of Voice — 16000, знания — 24000, рабочие правила — 5000 символов.')
         else:
             with transaction.atomic():
                 company = Company.objects.select_for_update(no_key=True).get(pk=company.pk)
-                before = {'tone_of_voice': company.tone_of_voice, 'knowledge': company.knowledge}
+                before = {'tone_of_voice': company.tone_of_voice, 'knowledge': company.knowledge, 'ai_working_style':company.ai_working_style}
                 company.tone_of_voice, company.knowledge = voice, knowledge
-                company.save(update_fields=['tone_of_voice', 'knowledge'])
-                Audit.objects.create(company=company, actor=request.user, action='tone.update', object_id=str(company.pk), before=before, after={'tone_of_voice': voice, 'knowledge': knowledge})
+                company.ai_working_style=working
+                company.save(update_fields=['tone_of_voice', 'knowledge','ai_working_style'])
+                Audit.objects.create(company=company, actor=request.user, action='tone.update', object_id=str(company.pk), before=before, after={'tone_of_voice': voice, 'knowledge': knowledge,'ai_working_style':working})
             messages.success(request, 'Профиль компании сохранён.')
         return redirect('tone')
     return render(request, 'desk/tone.html', context(request))
@@ -342,7 +391,7 @@ def tone(request):
 def ai_queue(request):
     from .models import AIJob, AIRequest
     scope = companies_for(request.user)
-    jobs = AIJob.objects.filter(thread__account__company__in=scope).select_related('thread__account__company', 'thread__product').order_by('-updated_at', '-pk')
+    jobs = AIJob.objects.filter(Q(thread__account__company__in=scope)|Q(test_case__account__company__in=scope)).select_related('thread__account__company', 'thread__product','test_case__account__company').order_by('-updated_at', '-pk')
     if request.GET.get('status') in dict(AIJob.STATUSES): jobs = jobs.filter(status=request.GET['status'])
     page = Paginator(jobs, 40).get_page(request.GET.get('page'))
     spent = AIRequest.objects.filter(company__in=scope, month=timezone.localdate().replace(day=1)).values('company_id').annotate(tokens=Sum('budget_tokens'), input=Sum('input_tokens'), output=Sum('output_tokens'))

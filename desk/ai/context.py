@@ -6,7 +6,7 @@ from django.db.models import Q
 from desk.models import KnowledgeEntry
 from .classification import local_classify, review_sections
 
-PIPELINE_VERSION = 'voice-ai-3.0'
+PIPELINE_VERSION = 'voice-ai-4.0'
 
 
 def digest(value):
@@ -67,7 +67,7 @@ def fact_score(text, title, query, platform, needs_return):
     return score
 
 
-def prepare(thread):
+def prepare(thread, *, history_override=None, mode='guided', materials_override=None):
     company = thread.account.company
     source = source_context(thread)
     code = thread.product.code if thread.product_id else ''
@@ -91,7 +91,7 @@ def prepare(thread):
         paragraph = paragraph.strip()
         if not paragraph or len(paragraph) > 3000 or not platform_matches(paragraph, thread.account.platform): continue
         score = fact_score(paragraph, '', query, thread.account.platform, needs_return)
-        candidates.append((score, f'profile:{i}:{digest(paragraph)[:12]}', paragraph, 'Подтверждённые знания компании'))
+        if score: candidates.append((score, f'profile:{i}:{digest(paragraph)[:12]}', paragraph, 'Подтверждённые знания компании'))
     selected, size = [], 0
     for score, identifier, text, origin in sorted(candidates, key=lambda row: (-row[0], row[1])):
         if len(selected) >= 6: break
@@ -103,7 +103,8 @@ def prepare(thread):
     decision = ({'decision': assessment.decision, 'signals': assessment.signals,
                  'severity': assessment.severity, 'objective_issue': assessment.objective_issue}
                 if assessment_is_current(thread) else None)
-    history = list(thread.messages.order_by('-created_at', '-pk').values('direction', 'text')[:6])[::-1]
+    history = (list(thread.messages.order_by('-created_at', '-pk').values('direction', 'text')[:6])[::-1]
+               if history_override is None else history_override)
     # Classification never sees this history or the brand's style instructions.
     history = [{'direction': m['direction'], 'text': m['text'][:2000]} for m in history]
     from desk.integrations.content import content_view
@@ -111,16 +112,20 @@ def prepare(thread):
     materials = {'photos': len(content['photos']), 'videos': len(content['videos']),
                  'images_analyzed': False,
                  'order_reference_available': any(item['label'] == 'ID заказа' for item in content['info'])}
+    if materials_override is not None: materials=materials_override
+    from desk.replies.policy import library_state
+    library = library_state(thread)
+    style = (company.ai_working_style or company.tone_of_voice) if mode == 'guided' else company.tone_of_voice
     settings = {'provider': company.ai_provider, 'model': company.ai_model,
                 'folder': company.ai_folder_id, 'key_env': company.ai_key_env,
-                'tone_of_voice': company.tone_of_voice, 'knowledge': company.knowledge,
+                'tone_of_voice': company.tone_of_voice, 'working_style': company.ai_working_style, 'knowledge': company.knowledge,
                 'entries': entries, 'operator_assessment': decision, 'history': history,
-                'available_materials': materials, 'version': PIPELINE_VERSION}
+                'available_materials': materials, 'reply_library': library, 'mode': mode, 'version': PIPELINE_VERSION}
     snapshot = {'source': source, 'provider': company.ai_provider, 'model': company.ai_model,
                 'folder': company.ai_folder_id, 'key_env': company.ai_key_env,
-                'tone_of_voice': company.tone_of_voice, 'facts': selected, 'history': history,
+                'tone_of_voice': style, 'facts': selected, 'history': history,
                 'operator_assessment': decision, 'available_materials': materials,
-                'version': PIPELINE_VERSION}
+                'reply_library': library, 'mode': mode, 'version': PIPELINE_VERSION}
     return digest(source), digest(settings), snapshot
 
 

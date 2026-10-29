@@ -76,3 +76,4 @@ jobs:
           desk.tests.test_ai_queue
           desk.tests.test_ai_profiles
           desk.tests.test_ai_drafting
+          desk.tests.test_reply_workbench

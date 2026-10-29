@@ -15,3 +15,13 @@ document.querySelectorAll('form').forEach(form => {
     }
   });
 });
+document.querySelectorAll('button[data-draft-text]').forEach(button => {
+  button.addEventListener('click', () => {
+    const editor = document.querySelector('textarea[name="text"]');
+    if (editor) {
+      editor.value = button.dataset.draftText;
+      editor.dispatchEvent(new Event('input', {bubbles: true}));
+      editor.focus();
+    }
+  });
+});

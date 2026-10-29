@@ -5,6 +5,7 @@
 <a class="{% if request.resolver_match.url_name == 'voc' %}active{% endif %}" href="{% url 'voc' %}"><span>◴</span>Контроль товаров</a>
 <a class="{% if request.resolver_match.url_name == 'products' or request.resolver_match.url_name == 'product' %}active{% endif %}" href="{% url 'products' %}"><span>◇</span>Каталог товаров</a>
 <a class="{% if request.resolver_match.url_name == 'imports' %}active{% endif %}" href="{% url 'imports' %}"><span>⇄</span>Product Mapping</a>
+<a class="{% if 'reply_' in request.resolver_match.url_name %}active{% endif %}" href="{% url 'reply_drafts' %}"><span>✎</span>Ответы и знания</a>
 <span class="nav-label">УПРАВЛЕНИЕ</span>
 <a class="{% if request.resolver_match.url_name == 'integrations' %}active{% endif %}" href="{% url 'integrations' %}"><span>⌘</span>Интеграции</a>
 <a class="{% if request.resolver_match.url_name == 'tone' %}active{% endif %}" href="{% url 'tone' %}"><span>≋</span>Tone of Voice</a>

@@ -1,5 +1,5 @@
 {% if human_only %}<div class="notice warning">Требуется проверка сотрудником: AI может подготовить черновик. Решение по обращению и отправка ответа остаются за человеком.</div>{% endif %}
-{% if analysis.draft and analysis_current and not draft_current %}<div class="notice warning">Стиль общения, знания или решение сотрудника изменились. Запустите «AI-анализ и черновик», чтобы получить актуальный текст.</div>{% endif %}
-{% if draft_current and analysis.evidence.operator_notes %}
-<div class="notice warning"><strong>Перед отправкой — только для сотрудника</strong><ul>{% for note in analysis.evidence.operator_notes %}<li>{{ note }}</li>{% endfor %}</ul><p>Эти пометки не входят в ответ клиенту. Замените заполнители в черновике подтверждёнными данными.</p></div>
+{% if analysis_current and not draft_current and reply_draft or analysis.draft and analysis_current and not draft_current %}<div class="notice warning">Стиль общения, знания или решение сотрудника изменились. Запустите «AI-анализ и черновик», чтобы получить актуальный текст.</div>{% endif %}
+{% if draft_current and draft_notes %}
+<div class="notice warning"><strong>Перед отправкой — только для сотрудника</strong><ul>{% for note in draft_notes %}<li>{{ note }}</li>{% endfor %}</ul><p>Эти пометки не входят в ответ клиенту. Замените заполнители в черновике подтверждёнными данными.</p></div>
 {% endif %}

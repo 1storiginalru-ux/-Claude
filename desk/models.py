@@ -12,6 +12,7 @@ class Company(models.Model):
     legal_entity = models.CharField('Юридическое лицо', max_length=240, blank=True)
     brand = models.CharField('Бренд', max_length=120, blank=True)
     tone_of_voice = models.TextField('Tone of Voice', blank=True)
+    ai_working_style = models.TextField('Краткие рабочие правила AI', blank=True, max_length=5000)
     knowledge = models.TextField('Подтверждённые знания', blank=True)
     ai_provider = models.CharField(max_length=20, choices=[('none', 'Не подключён'), ('yandex', 'Яндекс AI Studio'), ('openai', 'OpenAI'), ('anthropic', 'Anthropic')], default='none')
     ai_model = models.CharField(max_length=100, blank=True)
@@ -276,7 +277,8 @@ class KnowledgeEntry(models.Model):
 class AIJob(models.Model):
     STATUSES = [('queued', 'В очереди'), ('running', 'Выполняется'), ('retry', 'Ожидает повтора'),
                 ('done', 'Готово'), ('failed', 'Ошибка — требуется действие'), ('blocked', 'Лимит токенов'), ('cancelled', 'Данные изменились')]
-    thread = models.ForeignKey(Thread, on_delete=models.CASCADE, related_name='ai_jobs')
+    thread = models.ForeignKey(Thread, on_delete=models.CASCADE, related_name='ai_jobs', null=True)
+    test_case = models.ForeignKey('ReplyTestCase', on_delete=models.CASCADE, related_name='ai_jobs', null=True)
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     source_fingerprint = models.CharField(max_length=64)
     config_fingerprint = models.CharField(max_length=64)
@@ -292,8 +294,14 @@ class AIJob(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=['thread', 'source_fingerprint', 'config_fingerprint'], name='ai_job_revision_unique')]
+        constraints = [models.UniqueConstraint(fields=['thread', 'source_fingerprint', 'config_fingerprint'], name='ai_job_revision_unique'),
+                      models.UniqueConstraint(fields=['test_case', 'source_fingerprint', 'config_fingerprint'], name='ai_test_revision_unique'),
+                      models.CheckConstraint(condition=(Q(thread__isnull=False, test_case__isnull=True) | Q(thread__isnull=True, test_case__isnull=False)), name='ai_job_one_subject')]
         indexes = [models.Index(fields=['status', 'next_attempt'], name='ai_job_due_idx')]
+
+    @property
+    def company(self):
+        return self.thread.account.company if self.thread_id else self.test_case.account.company
 
 
 class AIRequest(models.Model):
@@ -447,3 +455,85 @@ class HistorySyncState(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['account', 'kind'], name='history_account_kind')]
+
+
+class ReplyMaterial(models.Model):
+    KINDS = [('example', 'Пример хорошего ответа'), ('template', 'Готовый шаблон')]
+    company = models.ForeignKey(Company, on_delete=models.PROTECT)
+    kind = models.CharField(max_length=12, choices=KINDS, default='example')
+    title = models.CharField('Название', max_length=200)
+    customer_text = models.TextField('Пример обращения', max_length=4000, blank=True)
+    answer = models.TextField('Ответ', max_length=3000)
+    explanation = models.TextField('Почему подходит / ограничения', max_length=2000, blank=True)
+    topic = models.CharField('Тема', max_length=40, blank=True)
+    sentiment = models.CharField(max_length=10, blank=True, choices=[('', 'Любая'), ('positive', 'Позитив'), ('negative', 'Негатив'), ('neutral', 'Нейтрально')])
+    thread_kind = models.CharField(max_length=10, blank=True, choices=[('', 'Отзывы и вопросы'), ('review', 'Отзыв'), ('question', 'Вопрос')])
+    platform = models.CharField(max_length=10, blank=True, choices=[('', 'Все площадки'), *Account._meta.get_field('platform').choices])
+    product_code = models.CharField('ProductID (необязательно)', max_length=100, blank=True)
+    brand = models.CharField('Бренд (необязательно)', max_length=100, blank=True)
+    excluded_words = models.TextField('Не использовать при словах/фразах, по одной на строке', max_length=2000, blank=True)
+    source_thread = models.ForeignKey(Thread, on_delete=models.SET_NULL, null=True, blank=True)
+    approved = models.BooleanField('Подтверждено', default=False)
+    active = models.BooleanField('Использовать', default=True)
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
+    version = models.PositiveIntegerField(default=1)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self): return self.title
+
+
+class ReplyRule(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.PROTECT)
+    name = models.CharField('Название', max_length=200)
+    active = models.BooleanField('Включено', default=True)
+    priority = models.PositiveIntegerField('Приоритет (меньше — выше)', default=100)
+    accounts = models.ManyToManyField(Account, blank=True)
+    condition_mode = models.CharField(max_length=3, default='all', choices=[('all', 'Все условия'), ('any', 'Любое условие')])
+    conditions = models.JSONField(default=dict)
+    action = models.CharField(max_length=12, default='ai', choices=[('ai', 'AI-черновик'), ('template', 'Готовый шаблон'), ('manual', 'Только сотрудник, без генерации')])
+    material = models.ForeignKey(ReplyMaterial, on_delete=models.PROTECT, null=True, blank=True)
+    version = models.PositiveIntegerField(default=1)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self): return self.name
+
+
+class ReplyTestCase(models.Model):
+    account = models.ForeignKey(Account, on_delete=models.PROTECT)
+    title = models.CharField('Название', max_length=200)
+    kind = models.CharField(max_length=10, choices=[('review', 'Отзыв'), ('question', 'Вопрос')], default='review')
+    text = models.TextField('Текст обращения', max_length=16000)
+    review_sections = models.JSONField(default=dict, blank=True)
+    rating = models.PositiveSmallIntegerField(null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(5)])
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, null=True, blank=True)
+    source_thread = models.ForeignKey(Thread, on_delete=models.SET_NULL, null=True, blank=True)
+    expected_answer = models.TextField('Желаемый ответ / критерии', max_length=4000, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['source_thread'], name='reply_case_source_unique')]
+
+
+class ReplyDraft(models.Model):
+    METHODS = [('ai', 'AI'), ('ai_example', 'AI по примерам'), ('template', 'Шаблон'), ('manual', 'Сотрудник')]
+    thread = models.ForeignKey(Thread, on_delete=models.PROTECT, related_name='reply_drafts', null=True)
+    test_case = models.ForeignKey(ReplyTestCase, on_delete=models.PROTECT, related_name='reply_drafts', null=True)
+    job = models.ForeignKey(AIJob, on_delete=models.SET_NULL, null=True, related_name='reply_drafts')
+    method = models.CharField(max_length=15, choices=METHODS)
+    text = models.TextField(max_length=5000, blank=True)
+    original_text = models.TextField(max_length=5000, blank=True)
+    notes = models.JSONField(default=list)
+    explanation = models.JSONField(default=dict)
+    source_fingerprint = models.CharField(max_length=64)
+    config_fingerprint = models.CharField(max_length=64)
+    version = models.PositiveIntegerField(default=1)
+    feedback = models.CharField(max_length=12, default='unreviewed', choices=[('unreviewed', 'Не проверен'), ('accepted', 'Подходит'), ('edited', 'Исправлен'), ('rejected', 'Не подходит')])
+    feedback_comment = models.TextField(max_length=2000, blank=True)
+    edited_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    outgoing = models.OneToOneField('Outgoing', on_delete=models.SET_NULL, null=True, related_name='reply_draft')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=(Q(thread__isnull=False, test_case__isnull=True) | Q(thread__isnull=True, test_case__isnull=False)), name='reply_draft_one_subject')]
