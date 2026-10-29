@@ -137,6 +137,48 @@ class AIProfileTests(DeskCase):
             'knowledge_file': SimpleUploadedFile('knowledge.md', b'NEW FACTS')})
         self.assertEqual(response.status_code, 403)
 
+    def test_upload_working_rules_only_with_browser_newlines_keeps_full_profile(self):
+        self.user.is_superuser = True; self.user.save(); self.client.force_login(self.user)
+        voice = 'Строка\n' * 190
+        voice += 'я' * (15896 - len(voice))
+        self.company.tone_of_voice = voice
+        self.company.knowledge = 'Подтверждённые\nзнания'
+        self.company.save()
+        self.assertGreater(len(voice.replace('\n', '\r\n')), 16000)
+        response = self.client.post(reverse('tone'), {'company': self.company.pk,
+            'tone_of_voice': voice.replace('\n', '\r\n'),
+            'knowledge': self.company.knowledge.replace('\n', '\r\n'),
+            'working_style_file': SimpleUploadedFile('working-style.md', 'Краткие\nрабочие правила'.encode())}, follow=True)
+        self.assertContains(response, 'Профиль компании сохранён.')
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.tone_of_voice, voice)
+        self.assertEqual(self.company.knowledge, 'Подтверждённые\nзнания')
+        self.assertEqual(self.company.ai_working_style, 'Краткие\nрабочие правила')
+
+    def test_working_rules_only_request_preserves_omitted_profile_fields(self):
+        self.user.is_superuser = True; self.user.save(); self.client.force_login(self.user)
+        self.company.knowledge = 'Existing knowledge'; self.company.save()
+        self.client.post(reverse('tone'), {'company':self.company.pk,
+            'working_style_file':SimpleUploadedFile('rules.md', b'Working rules')})
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.tone_of_voice, 'PROFILE_A_ONLY')
+        self.assertEqual(self.company.knowledge, 'Existing knowledge')
+        self.assertEqual(self.company.ai_working_style, 'Working rules')
+
+    def test_real_limit_error_names_field_and_does_not_partially_save(self):
+        self.user.is_superuser = True; self.user.save(); self.client.force_login(self.user)
+        response = self.client.post(reverse('tone'), {'company':self.company.pk,
+            'knowledge':'x' * 24001, 'ai_working_style':'New rules'}, follow=True)
+        self.assertContains(response, 'Знания: 24001')
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.ai_working_style, '')
+        self.assertEqual(self.company.tone_of_voice, 'PROFILE_A_ONLY')
+
+    def test_document_limit_counts_normalized_line_endings(self):
+        text = 'строка\n' * 150
+        text += 'я' * (5000-len(text))
+        self.assertEqual(extract_voice(SimpleUploadedFile('rules.md', text.replace('\n','\r\n').encode()),max_chars=5000),text)
+
     def test_unfilled_signature_cannot_be_enqueued_but_real_name_can(self):
         for placeholder in ['{{имя_сотрудника}}', '[имя сотрудника]', '[ФИО]']:
             with self.subTest(placeholder=placeholder), self.assertRaises(ValueError):

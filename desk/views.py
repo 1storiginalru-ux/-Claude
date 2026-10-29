@@ -353,8 +353,10 @@ def tone(request):
     if request.method == 'POST':
         company = get_object_or_404(companies_for(request.user), pk=request.POST.get('company'))
         require_role(request.user, company.pk, ['supervisor'])
-        voice, knowledge = request.POST.get('tone_of_voice', ''), request.POST.get('knowledge', '')
-        working = request.POST.get('ai_working_style', company.ai_working_style)
+        from .ai.documents import normalize_newlines
+        voice = normalize_newlines(request.POST.get('tone_of_voice', company.tone_of_voice))
+        knowledge = normalize_newlines(request.POST.get('knowledge', company.knowledge))
+        working = normalize_newlines(request.POST.get('ai_working_style', company.ai_working_style))
         if request.FILES.get('voice_file'):
             from .ai.documents import extract_voice
             try: voice = extract_voice(request.FILES['voice_file'])
@@ -372,8 +374,11 @@ def tone(request):
             try: working = extract_voice(request.FILES['working_style_file'],max_chars=5000)
             except ValueError as error:
                 messages.error(request,str(error));return redirect('tone')
-        if len(voice) > 16000 or len(knowledge) > 24000 or len(working)>5000:
-            messages.error(request, 'Лимиты: Tone of Voice — 16000, знания — 24000, рабочие правила — 5000 символов.')
+        exceeded = [f'{name}: {len(text)} символов при лимите {limit}.'
+                    for name,text,limit in [('Tone of Voice',voice,16000),('Знания',knowledge,24000),('Рабочие правила',working,5000)]
+                    if len(text)>limit]
+        if exceeded:
+            messages.error(request, ' '.join(exceeded))
         else:
             with transaction.atomic():
                 company = Company.objects.select_for_update(no_key=True).get(pk=company.pk)

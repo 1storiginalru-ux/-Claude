@@ -5,6 +5,10 @@ import zipfile
 from pypdf import PdfReader
 
 
+def normalize_newlines(text):
+    return text.replace('\r\n', '\n').replace('\r', '\n')
+
+
 def extract_voice(upload, *, max_chars=16000):
     data = upload.read(5 * 1024 * 1024 + 1)
     if len(data) > 5 * 1024 * 1024: raise ValueError('Документ должен быть не больше 5 МБ.')
@@ -24,7 +28,7 @@ def extract_voice(upload, *, max_chars=16000):
             if reader.is_encrypted or len(reader.pages) > 100: raise ValueError('PDF должен быть без пароля и не более 100 страниц.')
             pieces, size = [], 0
             for page in reader.pages:
-                part = page.extract_text() or ''
+                part = normalize_newlines(page.extract_text() or '')
                 size += len(part)
                 if size > max_chars: raise ValueError(f'Текст документа не должен превышать {max_chars} символов.')
                 pieces.append(part)
@@ -32,6 +36,6 @@ def extract_voice(upload, *, max_chars=16000):
         else: raise ValueError('Поддерживаются TXT, Markdown, PDF и DOCX.')
     except ValueError: raise
     except Exception as e: raise ValueError('Документ не удалось прочитать. Для сканов PDF нужен предварительный OCR.') from e
-    text = text.strip()
+    text = normalize_newlines(text).strip()
     if not text or len(text) > max_chars: raise ValueError(f'Нужен текст от 1 до {max_chars} символов. Для сканов PDF нужен OCR.')
     return text
