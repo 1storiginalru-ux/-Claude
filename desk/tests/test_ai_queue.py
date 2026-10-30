@@ -306,13 +306,17 @@ class AIQueueTests(AIConfiguredCase):
         source.text = 'Очень приятный аромат'
         SyncState.objects.filter(account=self.account).update(next_attempt=timezone.now())
         sync_account(self.account)
-        self.assertEqual(AIJob.objects.count(), 1); post.assert_not_called()
+        self.assertEqual(AIJob.objects.count(), 2); post.assert_not_called()
         post.side_effect = ProviderProblem('HTTP 403', rejected=True)
         process_one()
         SyncState.objects.filter(account=self.account).update(next_attempt=timezone.now())
         sync_account(self.account)
-        self.assertEqual(AIJob.objects.get().status, 'failed')
-        self.assertEqual(AIJob.objects.get().attempts, 1)
+        classification = AIJob.objects.get(snapshot__classification_only=True)
+        self.assertEqual(classification.status, 'failed')
+        self.assertEqual(classification.attempts, 1)
+        process_one()  # Dependent reply fails without a second paid classification.
+        self.assertFalse(AIJob.objects.exclude(status='failed').exists())
+        self.assertEqual(post.call_count, 1)
 
     @patch('desk.ai.queue.complete')
     def test_terminal_failure_requires_explicit_manual_retry(self, post):

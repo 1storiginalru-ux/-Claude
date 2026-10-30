@@ -53,6 +53,19 @@ class ReviewControlCase(DeskCase):
 
 
 class HumanReviewTests(ReviewControlCase):
+    def test_unreviewed_pending_and_confirmed_states_are_distinct(self):
+        url = f'/threads/{self.thread.pk}/'
+        response = self.client.get(url)
+        self.assertContains(response, 'Оператор ещё не проверял')
+        self.assertContains(response, 'начальные значения формы')
+        self.assertNotContains(response, 'Решение отложено')
+        self.confirm(decision='pending')
+        response = self.client.get(url)
+        self.assertContains(response, 'Решение отложено')
+        self.assertNotContains(response, 'Оператор ещё не проверял')
+        self.confirm()
+        self.assertContains(self.client.get(url), 'Подтверждено сотрудником')
+
     def test_human_confirmation_works_without_ai_and_preserves_original(self):
         self.events(); original = self.analysis(provider='rules', confidence=0, signals=['LONG', 'AUTH-UNKNOWN'])
         self.confirm()
@@ -351,6 +364,57 @@ class IncidentWorkflowTests(ReviewControlCase):
     def test_review_text_is_visible_even_without_imported_messages(self):
         self.thread.messages.all().delete()
         self.assertContains(self.client.get(f'/threads/{self.thread.pk}/'), self.thread.text)
+
+    def test_legacy_snapshot_is_not_presented_as_the_opening_trigger_or_rewritten(self):
+        snapshot = dict(self.case.opening_snapshot)
+        snapshot.pop('trigger')
+        snapshot.update(count=0, redemptions=93, rate=None,
+                        reason='Не все отзывы разобраны; предварительная разметка не подтверждает отсутствие жалоб')
+        self.case.opening_snapshot = snapshot; self.case.save()
+        response = self.client.get(f'/incidents/{self.case.pk}/')
+        self.assertContains(response, 'Историческое основание открытия отдельно не сохранялось')
+        self.assertContains(response, 'Показатели на момент открытия')
+        self.assertContains(response, 'Учтённых негативных отзывов по теме в расчётном окне')
+        self.case.refresh_from_db(); self.assertEqual(self.case.opening_snapshot, snapshot)
+
+    def test_saved_opening_reason_survives_later_reclassification(self):
+        before = dict(self.case.opening_snapshot)
+        self.confirm(decision='non_negative', signals=[], severity='P3')
+        self.case.refresh_from_db()
+        self.assertEqual(self.case.opening_snapshot, before)
+        self.assertEqual(self.case.status, 'INVESTIGATION')
+
+
+class SeriousIncidentEvidenceTests(ReviewControlCase):
+    def test_preliminary_or_low_confidence_analysis_cannot_open_a_serious_case(self):
+        a = self.analysis(provider='rules', confidence=0, objective_issue=True, severity='P1')
+        evaluate_incidents(self.thread); self.assertFalse(Incident.objects.exists())
+        for provider, confidence in [('yandex', 0.69), ('demo', 1)]:
+            Analysis.objects.filter(pk=a.pk).update(provider=provider, confidence=confidence)
+            self.thread.refresh_from_db(); evaluate_incidents(self.thread)
+            self.assertFalse(Incident.objects.exists())
+        # A deliberate human escalation remains available without AI.
+        case = escalate(self.thread, 'LONG_AUTH', self.user)
+        self.assertEqual(case.opening_snapshot['trigger']['type'], 'manual')
+
+    def test_serious_trigger_is_distinct_from_a_zero_count_in_the_sales_window(self):
+        self.events()
+        self.thread.received_at = self.now - timedelta(minutes=1); self.thread.save()
+        SyncState.objects.update(coverage_until=self.now - timedelta(minutes=3))
+        HistorySyncState.objects.update(coverage_until=self.now - timedelta(minutes=3))
+        self.analysis(provider='yandex', objective_issue=True, severity='P1', summary='Покупатель сообщил о проблеме')
+        evaluate_incidents(self.thread)
+        case = Incident.objects.get()
+        snapshot = case.opening_snapshot
+        self.assertEqual(snapshot['count'], 0)
+        self.assertEqual(snapshot['trigger']['type'], 'serious')
+        self.assertEqual(snapshot['trigger']['thread_id'], self.thread.pk)
+        self.assertEqual(snapshot['trigger']['provider'], 'yandex')
+        response = self.client.get(f'/incidents/{case.pk}/')
+        self.assertContains(response, 'Серьёзная конкретная проблема по разметке отзыва')
+        self.assertContains(response, 'не подтверждает дефект или подделку')
+        self.assertContains(response, f'отзыв №{self.thread.pk}')
+        self.assertNotContains(response, 'Историческое основание')
 
 
 @skipUnless(connection.vendor == 'postgresql', 'Проверка блокировок PostgreSQL')

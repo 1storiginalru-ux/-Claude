@@ -1,7 +1,30 @@
 {% extends 'base.html' %}{% block breadcrumb %}Расследование #{{ incident.pk }}{% endblock %}{% block content %}
 <a class="back-link" href="{% url 'voc' %}">← Контроль товаров</a><div class="page-heading"><div><div class="eyebrow">РАССЛЕДОВАНИЕ #{{ incident.pk }}</div><h1>{{ incident.product.name }}</h1><p>{{ incident.product.code }} · {{ incident.display_signal }} · создано {{ incident.created_at|date:'d.m.Y' }}</p></div><span class="pill danger">{{ incident.severity }} · {{ incident.get_status_display }}</span></div>
 <div class="detail-layout"><div>
-<section class="panel padded"><h2>Почему открыто расследование</h2>{% if snapshot %}<p>{{ snapshot.reason }}{% if snapshot.account_name %} · кабинет {{ snapshot.account_name }}{% endif %}</p>{% if snapshot.cluster_count %}<p><b>Серия похожих жалоб: {{ snapshot.cluster_count }}</b></p>{% endif %}{% if snapshot.start %}<p><b>{{ snapshot.count }}</b> сигналов / <b>{{ snapshot.redemptions }}</b> выкупов · на 100: <b>{{ snapshot.rate|default_if_none:'—' }}</b></p>{% else %}<p>Окно выкупов ещё не определено; частота не рассчитана.</p>{% endif %}<p class="muted">Период: {{ snapshot_start|date:'d.m.Y H:i'|default:'начало не определено' }} — {{ snapshot_until|date:'d.m.Y H:i' }} МСК.</p>{% if snapshot.warnings %}<div class="notice warning">На момент открытия: {{ snapshot.warnings|join:'; ' }}.</div>{% endif %}<p class="muted">Снимок при открытии сохраняется. Текущие показатели могут изменяться по мере новых продаж и отзывов.</p>{% elif snapshot_hidden %}<p>Полный снимок включает компании за пределами вашего доступа. Ниже показаны доступные вам обращения.</p>{% else %}<p>Исторический случай: снимок показателей при открытии не сохранялся.</p>{% endif %}<a class="button small" href="{% url 'product' incident.product.pk %}">Текущие показатели товара ↗</a></section>
+<section class="panel padded">
+<h2>Почему открыто расследование</h2>
+{% if snapshot %}
+{% if snapshot.trigger %}
+<p><b>{{ snapshot.trigger.reason }}</b></p>
+<p>Основание: <a href="{% url 'thread' snapshot.trigger.thread_id %}">отзыв №{{ snapshot.trigger.thread_id }}</a> · {{ snapshot.trigger.account_name }}.</p>
+{% if snapshot.trigger.provider %}<p class="muted">Разметка на момент открытия: {% if snapshot.trigger.provider == 'human' %}решение сотрудника{% elif snapshot.trigger.provider == 'rules' %}предварительная по словам{% else %}AI · {{ snapshot.trigger.provider }}{% endif %}{% if snapshot.trigger.confidence != None %} · уверенность {{ snapshot.trigger.confidence|floatformat:2 }}{% endif %} · важность {{ snapshot.trigger.severity }}.</p>{% endif %}
+{% if snapshot.trigger.summary %}<p>{{ snapshot.trigger.summary }}</p>{% endif %}
+<p class="muted">Основание для проверки не подтверждает дефект или подделку. Вывод фиксирует ответственный после проверки.</p>
+{% else %}
+<p>Историческое основание открытия отдельно не сохранялось. Связанные обращения показаны справа; их текущая разметка могла измениться после открытия.</p>
+{% endif %}
+<h3>Показатели на момент открытия</h3>
+<p>{{ snapshot.reason }}{% if snapshot.account_name %} · кабинет {{ snapshot.account_name }}{% endif %}</p>
+{% if snapshot.cluster_count %}<p><b>Серия похожих жалоб: {{ snapshot.cluster_count }}</b></p>{% endif %}
+{% if snapshot.start %}<p>Учтённых негативных отзывов по теме в расчётном окне: <b>{{ snapshot.count }}</b>. Выкупов: <b>{{ snapshot.redemptions }}</b>. На 100 выкупов: <b>{{ snapshot.rate|default_if_none:'—' }}</b>.</p>{% else %}<p>Окно выкупов ещё не определено; частота не рассчитана.</p>{% endif %}
+<p class="muted">Счётчик в окне и число связанных обращений могут различаться: обращение может быть за пределами окна или ещё не иметь разметки, участвующей в расчёте.</p>
+<p class="muted">Период: {{ snapshot_start|date:'d.m.Y H:i'|default:'начало не определено' }} — {{ snapshot_until|date:'d.m.Y H:i' }} МСК.</p>
+{% if snapshot.warnings %}<div class="notice warning">На момент открытия: {{ snapshot.warnings|join:'; ' }}.</div>{% endif %}
+<p class="muted">Снимок при открытии сохраняется. Текущие показатели могут изменяться по мере новых продаж и отзывов.</p>
+{% elif snapshot_hidden %}<p>Полный снимок включает компании за пределами вашего доступа. Ниже показаны доступные вам обращения.</p>
+{% else %}<p>Исторический случай: снимок показателей при открытии не сохранялся.</p>{% endif %}
+<a class="button small" href="{% url 'product' incident.product.pk %}">Текущие показатели товара ↗</a>
+</section>
 <section class="panel padded"><h2>Работа с проблемой</h2>{% if can_edit %}<form method="post" class="stack">{% csrf_token %}<input type="hidden" name="version" value="{{ incident.updated_at.isoformat }}">
 <label>Статус<select name="status">{% for value,label in incident_statuses %}<option value="{{ value }}" {% if incident.status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
 <label>Ответственный<select name="owner"><option value="">Не назначен</option>{% for owner in owners %}<option value="{{ owner.pk }}" {% if incident.owner_id == owner.pk %}selected{% endif %}>{{ owner.get_full_name|default:owner.username }}</option>{% endfor %}</select></label>

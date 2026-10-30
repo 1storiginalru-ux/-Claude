@@ -46,7 +46,19 @@ class StrictReplyTests(AIConfiguredCase):
         SyncState.objects.filter(account=self.account).update(next_attempt=timezone.now())
         sync_account(self.account)
         self.assertEqual(ReplyDraft.objects.count(),1);complete.assert_not_called()
-        self.assertFalse(AIJob.objects.exists());self.assertFalse(AIRequest.objects.exists());self.assertFalse(Outgoing.objects.exists())
+        self.assertTrue(AIJob.objects.get().snapshot['classification_only'])
+        self.assertFalse(AIRequest.objects.exists());self.assertFalse(Outgoing.objects.exists())
+        before = ReplyDraft.objects.values().get(pk=draft.pk)
+        complete.return_value = self.answer(NEGATIVE)
+        process_one()
+        self.assertEqual(complete.call_count, 1)
+        self.assertEqual(ReplyDraft.objects.values().get(pk=draft.pk), before)
+        self.assertEqual(Analysis.objects.get(thread=draft.thread).provider, 'yandex')
+        # Polling the unchanged source cannot reset the completed result to rules.
+        SyncState.objects.filter(account=self.account).update(next_attempt=timezone.now())
+        sync_account(self.account)
+        self.assertEqual(Analysis.objects.get(thread=draft.thread).provider, 'yandex')
+        self.assertEqual(AIJob.objects.count(), 1)
 
     @patch('desk.integrations.details.enrich_account',return_value=0)
     @patch('desk.integrations.sync.get_adapter')
@@ -60,10 +72,10 @@ class StrictReplyTests(AIConfiguredCase):
         adapter.return_value=Mock(completed_window=None,fetch=Mock(return_value=[incoming]))
         sync_account(self.account);self.assertFalse(AIJob.objects.exists())
         sync_account(self.ym)
-        self.assertEqual(AIJob.objects.count(),1);self.assertEqual(AIJob.objects.get().thread.account_id,self.ym.pk)
+        self.assertEqual(AIJob.objects.count(),2);self.assertEqual(set(AIJob.objects.values_list('thread__account_id',flat=True)),{self.ym.pk})
         incoming.kind='question';incoming.external_id='new-question';incoming.text='Какой объём?';incoming.rating=None
         SyncState.objects.filter(account=self.ym).update(next_attempt=timezone.now())
-        sync_account(self.ym);self.assertEqual(AIJob.objects.count(),1)
+        sync_account(self.ym);self.assertEqual(AIJob.objects.count(),2)
         complete.assert_not_called();self.assertFalse(Outgoing.objects.exists())
 
     @patch('desk.ai.queue.complete')

@@ -79,3 +79,4 @@ jobs:
           desk.tests.test_reply_workbench
           desk.tests.test_strict_replies
           desk.tests.test_reply_rollout
+          desk.tests.test_control_analysis

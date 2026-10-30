@@ -7,6 +7,7 @@ from desk.models import KnowledgeEntry
 from .classification import local_classify, review_sections
 
 PIPELINE_VERSION = 'voice-ai-5.1'
+CLASSIFICATION_VERSION = 'voice-voc-1'
 
 
 def digest(value):
@@ -25,6 +26,17 @@ def source_context(thread):
 
 
 def source_digest(thread): return digest(source_context(thread))
+
+
+def prepare_classification(thread):
+    """VoC does not depend on reply wording, library, signature or operator edits."""
+    company = thread.account.company
+    settings = {'provider': company.ai_provider, 'model': company.ai_model,
+                'folder': company.ai_folder_id, 'key_env': company.ai_key_env,
+                'version': CLASSIFICATION_VERSION, 'classification_only': True}
+    config = digest(settings)
+    return source_digest(thread), config, {**settings, 'source': source_context(thread),
+                                         'classification_config': config, 'facts': []}
 
 
 def words(text):
@@ -130,6 +142,7 @@ def prepare(thread, *, history_override=None, mode='guided', materials_override=
                 'operator_assessment': decision, 'available_materials': materials,
                 'reply_library': library, 'mode': mode, 'version': PIPELINE_VERSION,
                 'strict_templates': company.reply_sensitive_templates, 'customer_greeting': greeting(thread)}
+    snapshot['classification_config'] = prepare_classification(thread)[1]
     return source_digest(thread), digest(settings), snapshot
 
 

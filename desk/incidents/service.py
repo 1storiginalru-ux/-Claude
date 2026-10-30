@@ -10,7 +10,7 @@ from desk.reviews import effective_analysis
 
 
 @transaction.atomic
-def escalate(thread, signal, actor=None, metric=None):
+def escalate(thread, signal, actor=None, metric=None, *, trigger=None):
     if not thread.product_id: raise ValueError('Сначала сопоставьте SKU с ProductID.')
     analysis = effective_analysis(thread)
     severity = analysis.severity if analysis else 'P2'
@@ -33,6 +33,18 @@ def escalate(thread, signal, actor=None, metric=None):
             'cluster_count': metric.get('cluster_count', 0),
             'account_id': metric.get('account_id'),
             'account_name': thread.account.name if metric.get('account_id') == thread.account_id else None,
+            'trigger': {
+                'type': trigger or 'manual',
+                'reason': {'serious': 'Серьёзная конкретная проблема по разметке отзыва',
+                           'threshold': 'Достигнут порог расследования',
+                           'cluster': 'Серия похожих жалоб',
+                           'manual': 'Проверка открыта сотрудником'}.get(trigger or 'manual'),
+                'thread_id': thread.pk, 'account_name': thread.account.name,
+                'provider': analysis.provider if analysis else '',
+                'confidence': analysis.confidence if analysis else None,
+                'severity': severity, 'objective_issue': bool(analysis and analysis.objective_issue),
+                'summary': getattr(analysis, 'summary', ''),
+            },
         }
         incident.save(update_fields=['opening_snapshot'])
     incident.threads.add(thread)
@@ -42,7 +54,7 @@ def escalate(thread, signal, actor=None, metric=None):
     if not linked:
         thread.status = 'Эскалировано'
         thread.save(update_fields=['status'])
-        Audit.objects.create(company=thread.account.company, actor=actor, action='incident.created' if created else 'incident.linked', object_id=str(incident.pk), after={'thread': thread.pk, 'signal': signal})
+        Audit.objects.create(company=thread.account.company, actor=actor, action='incident.created' if created else 'incident.linked', object_id=str(incident.pk), after={'thread': thread.pk, 'signal': signal, 'trigger': trigger or 'manual'})
     return incident
 
 
@@ -59,8 +71,8 @@ def evaluate_incidents(thread, actor=None):
             if scoped['status'] == 'ANOMALY': stats = scoped
         if stats['status'] == 'ANOMALY':
             attach_metric_incident(thread.product, stats, actor)
-        elif signal != 'NEGATIVE' and analysis.objective_issue and analysis.severity in {'P0', 'P1'}:
-            escalate(thread, signal, actor, stats)
+        elif signal != 'NEGATIVE' and trusted_analysis(analysis) and analysis.objective_issue and analysis.severity in {'P0', 'P1'}:
+            escalate(thread, signal, actor, stats, trigger='serious')
         elif is_negative(analysis) and trusted_analysis(analysis):
             canonical = product_family(thread.product).order_by('pk').first()
             if Incident.objects.filter(product=canonical, signal=signal).exclude(status='CLOSED').exists():
@@ -82,7 +94,7 @@ def attach_metric_incident(product, metric, actor=None):
         if all(t.pk in closed_ids for t in selected):
             return  # Closing a case is deliberate; old evidence must not reopen it every minute.
     for thread in selected:
-        escalate(thread, metric['signal'], actor, metric)
+        escalate(thread, metric['signal'], actor, metric, trigger='cluster' if metric.get('cluster') else 'threshold')
 
 
 def recheck_products():

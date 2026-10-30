@@ -124,13 +124,20 @@ def sync_account(account):
                 # Polling never waits for a model. Auto work is opt-in; historical
                 # imports use local rules and need a separately selected batch.
                 from desk.models import Analysis
-                needs_analysis = changed or not hasattr(thread, 'analysis')
+                from desk.ai.context import source_digest
+                previous = getattr(thread, 'analysis', None)
+                needs_analysis = previous is None or (changed and not (
+                    previous.provider not in {'rules', 'demo'} and previous.source_fingerprint == source_digest(thread)))
                 if needs_analysis:
                     from desk.ai.classification import local_classify, review_sections, RULES_VERSION
                     defaults = local_classify(thread.text, thread.rating, sections=review_sections(thread), kind=thread.kind)
                     Analysis.objects.update_or_create(thread=thread, defaults={**defaults, 'provider': 'rules', 'model': '',
                         'prompt_version': RULES_VERSION, 'source_fingerprint': '', 'evidence': {}})
                 if company.ai_auto_enabled and account.ai_auto_enabled and needs_analysis and thread.kind == 'review':
+                    try:
+                        from desk.ai.queue import enqueue
+                        enqueue(thread, classification_only=True)
+                    except AIProblem: analysis_errors += 1
                     try:
                         from desk.replies.service import prepare_reply
                         prepare_reply(thread, None, retry_failed=False)

@@ -8,7 +8,7 @@ from django.utils import timezone
 from desk.models import AIJob, AIRequest, Analysis, Audit, Company, Thread
 from desk.voc.rules import human_only, MIN_CLASSIFICATION_CONFIDENCE
 from .classification import local_classify
-from .context import PIPELINE_VERSION, prepare
+from .context import PIPELINE_VERSION, prepare, prepare_classification
 from .client import ProviderProblem, complete, validate_settings
 from .provider import AIProblem, validate_result
 from .drafting import DRAFTER, BASELINE_DRAFTER, validate_draft, review_notes
@@ -41,27 +41,48 @@ class TokenLimit(AIProblem): pass
 
 
 @transaction.atomic
-def enqueue(thread, actor=None, *, force=False, retry_failed=False, draft_only=False):
+def enqueue(thread, actor=None, *, force=False, retry_failed=False, draft_only=False, classification_only=False):
     thread = Thread.objects.select_for_update(of=('self',), no_key=True).select_related('account__company', 'product').get(pk=thread.pk)
     company = thread.account.company
     if company.is_demo or not thread.account.enabled:
         raise AIProblem('AI доступен только для подключённого реального кабинета.')
-    source, config, snapshot = prepare(thread)
+    source, config, snapshot = prepare_classification(thread) if classification_only else prepare(thread)
     validate_settings(snapshot)
-    AIJob.objects.filter(thread=thread, status__in=['queued', 'retry', 'blocked', 'running']).exclude(
-        source_fingerprint=source, config_fingerprint=config).update(status='cancelled', lease_token=None, lease_until=None, error='Отзыв или настройки изменились.')
+    active = list(AIJob.objects.filter(thread=thread, status__in=['queued', 'retry', 'blocked', 'running']))
+    obsolete = [j.pk for j in active if j.source_fingerprint != source or
+                (bool(j.snapshot.get('classification_only')) == classification_only and j.config_fingerprint != config)]
+    AIJob.objects.filter(pk__in=obsolete).update(status='cancelled', lease_token=None, lease_until=None, error='Отзыв или настройки изменились.')
+    # A reply job already includes classification. A reply requested while an
+    # independent classification is running waits for its checkpoint, not a
+    # second paid call. Enqueue is serialized by the review row lock.
+    compatible = AIJob.objects.filter(thread=thread, source_fingerprint=source,
+        snapshot__classification_config=snapshot['classification_config']).exclude(pk__in=obsolete).order_by('-pk')
+    cached = {}
+    analysis_current = Analysis.objects.filter(thread=thread, source_fingerprint=source,
+                                              provider=snapshot['provider'], model=snapshot['model']).exists()
+    if classification_only:
+        full = compatible.filter(snapshot__classification_only__isnull=True, status__in=['queued', 'retry', 'blocked', 'running', 'done']).first()
+        if full and not force:
+            if full.status != 'done' or analysis_current: return full
+            cached = full.classification
+    elif not force or draft_only:
+        dependency = compatible.filter(snapshot__classification_only=True, status__in=['queued', 'retry', 'blocked', 'running', 'done']).first()
+        if dependency: snapshot['classification_job'] = dependency.pk
     job, created = AIJob.objects.get_or_create(thread=thread, source_fingerprint=source, config_fingerprint=config,
-                                              defaults={'actor': actor, 'snapshot': snapshot})
-    if not created and (retry_failed and job.status in {'failed', 'cancelled', 'blocked'} or force and job.status == 'done'):
+                                              defaults={'actor': actor, 'snapshot': snapshot, 'classification': cached})
+    restore_cached = classification_only and job.status == 'done' and not analysis_current and bool(job.classification)
+    if not created and (retry_failed and job.status in {'failed', 'cancelled', 'blocked'} or force and job.status == 'done' or restore_cached):
         job.status, job.error, job.attempts = 'queued', '', 0
         job.next_attempt, job.lease_token, job.lease_until = timezone.now(), None, None
         if force and not draft_only: job.classification = {}
+        job.snapshot = snapshot
         job.actor = actor
         job.save()
     if created or force:
         Audit.objects.create(company=company, actor=actor, action='ai.queued', object_id=str(job.pk),
                              after={'thread': thread.pk, 'provider': snapshot['provider'], 'model': snapshot['model'],
-                                    'source': source, 'config': config, 'version': PIPELINE_VERSION})
+                                    'source': source, 'config': config, 'version': snapshot['version'],
+                                    'classification_only': classification_only})
     return job
 
 
@@ -74,7 +95,7 @@ def current_thread(job):
         thread = case_subject(case)
     else:
         thread = Thread.objects.select_related('account__company', 'product', 'assessment').get(pk=job.thread_id)
-        source, config, _ = prepare(thread)
+        source, config, _ = prepare_classification(thread) if job.snapshot.get('classification_only') else prepare(thread)
     if source != job.source_fingerprint or config != job.config_fingerprint or thread.account.company.is_demo or not thread.account.enabled:
         raise StaleJob
     return thread
@@ -128,11 +149,12 @@ def save_result(job, data, *, used_fact_ids=(), operator_notes=(), routing=None,
     if restricted(thread, data) or data['confidence'] < MIN_CLASSIFICATION_CONFIDENCE:
         data = {**data, 'requires_human': True}
     old = Analysis.objects.filter(thread=thread).values('provider', 'model', 'sentiment', 'signals', 'confidence', 'draft').first()
-    evidence = {'job': job.pk, 'version': PIPELINE_VERSION, 'config': job.config_fingerprint,
+    evidence = {'job': job.pk, 'version': job.snapshot['version'], 'config': job.config_fingerprint,
+                'classification_only': bool(job.snapshot.get('classification_only')),
                 'facts': job.snapshot['facts'], 'used_fact_ids': list(used_fact_ids),
                 'operator_notes': review_notes(data, operator_notes), 'reply_plan': public_plan(routing) if routing else {}}
     result, _ = Analysis.objects.update_or_create(thread=thread, defaults={**data, 'provider': job.snapshot['provider'],
-        'model': job.snapshot['model'], 'prompt_version': PIPELINE_VERSION, 'source_fingerprint': job.source_fingerprint, 'evidence': evidence})
+        'model': job.snapshot['model'], 'prompt_version': job.snapshot['version'], 'source_fingerprint': job.source_fingerprint, 'evidence': evidence})
     Audit.objects.create(company=thread.account.company, actor=job.actor, action='analysis.create', object_id=str(thread.pk),
                          before=old or {}, after={**data, 'provider': result.provider, 'model': result.model, 'evidence': evidence})
     if routing is not None: store_result(job,data,operator_notes,routing,method=method)
@@ -155,6 +177,19 @@ def process_one():
         thread = current_thread(job)
         if len(thread.text) > 16000: raise AIProblem('Отзыв слишком длинный для автоматического анализа; проверьте его вручную.')
         data = job.classification
+        dependency_id = job.snapshot.get('classification_job')
+        if not data and dependency_id:
+            dependency = AIJob.objects.get(pk=dependency_id)
+            if dependency.status in {'queued', 'retry', 'blocked', 'running'}:
+                AIJob.objects.filter(pk=job.pk, status='running', lease_token=token).update(
+                    status='retry', next_attempt=max(timezone.now() + timedelta(seconds=30), dependency.next_attempt),
+                    attempts=max(0, job.attempts - 1), lease_token=None, lease_until=None,
+                    error='Ожидает независимую классификацию этого отзыва.')
+                return True
+            if dependency.classification:
+                data = dependency.classification
+            else:
+                raise AIProblem('Классификация отзыва не завершена. Проверьте её задачу; повторный платный запрос автоматически не создаётся.')
         if job.test_case_id: data = local_classify(thread.text,thread.rating,sections=job.snapshot['source']['review_sections'],kind=thread.kind)
         if not data:
             raw = call(job, 'classification', CLASSIFIER, job.snapshot['source'], 768)
@@ -170,6 +205,15 @@ def process_one():
                 AIJob.objects.filter(pk=job.pk, lease_token=token, status='running').update(classification=data)
             job.classification = data
         thread = current_thread(job)
+        if job.snapshot.get('classification_only'):
+            with transaction.atomic():
+                save_result(job, data)
+                AIJob.objects.filter(pk=job.pk, status='running', lease_token=token).update(
+                    status='done', error='', lease_until=None, lease_token=None)
+            from desk.incidents.service import evaluate_incidents
+            fresh = Thread.objects.select_related('analysis', 'assessment', 'account', 'product').get(pk=thread.pk)
+            evaluate_incidents(fresh, actor=job.actor)
+            return True
         # Human Only governs decisions/publication, not assistance with wording.
         # Low confidence remains visible and never becomes a confirmed verdict.
         if restricted(thread, data): data = {**data, 'requires_human': True}
