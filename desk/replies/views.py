@@ -11,7 +11,7 @@ from django.utils.dateparse import parse_datetime
 from datetime import date, datetime, time, timedelta
 from django.utils import timezone
 from desk.access import companies_for, require_role
-from desk.models import Account, Audit, KnowledgeEntry, Membership, ReplyDraft, ReplyMaterial, ReplyRule, ReplyTestCase, Thread
+from desk.models import Account, Audit, Company, KnowledgeEntry, Membership, ReplyDraft, ReplyMaterial, ReplyRule, ReplyTestCase, Thread
 from desk.views import context
 from .forms import MaterialForm, RuleForm, FactForm, TestCaseForm
 from .service import draft_current, enqueue_test
@@ -76,6 +76,16 @@ def materials(request,pk=None):
 @login_required
 def rules(request,pk=None):
     company=selected_company(request)
+    if request.method == 'POST' and request.POST.get('action') == 'sensitive_policy':
+        require_role(request.user,company.pk,['supervisor'])
+        with transaction.atomic():
+            company=Company.objects.select_for_update(no_key=True).get(pk=company.pk)
+            before=company.reply_sensitive_templates
+            company.reply_sensitive_templates=request.POST.get('enabled')=='yes'
+            company.save(update_fields=['reply_sensitive_templates'])
+            audit(request,company,'reply.policy.saved',company,{'strict_templates':before},{'strict_templates':company.reply_sensitive_templates})
+        messages.success(request,'Режим обработки негатива сохранён.')
+        return finish(request,'reply_rules',company)
     obj=get_object_or_404(ReplyRule,pk=pk,company=company) if pk else ReplyRule(company=company)
     form=RuleForm(request.POST or None,instance=obj,company=company)
     if request.method=='POST':
@@ -164,7 +174,7 @@ def test_run(request,pk):
         mode=request.POST.get('mode','guided'); model=request.POST.get('model','').strip()
         with transaction.atomic():
             for variant in (['baseline','guided'] if mode=='both' else [mode]): enqueue_test(case,request.user,mode=variant,model=model,force=request.POST.get('repeat')=='yes')
-        messages.success(request,'Испытание поставлено в очередь AI. Расход входит в лимит компании. Рабочие отзывы и отправки не меняются.')
+        messages.success(request,'Испытание поставлено в очередь. Шаблон или ответ сотрудника обходятся без AI-запроса; генерация оплачивается по тарифу модели. Рабочие отзывы и отправки не меняются.')
     except AIProblem as error: messages.error(request,str(error))
     return redirect('reply_tests')
 

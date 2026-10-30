@@ -8,7 +8,7 @@ class Command(BaseCommand):
     help='Партия изолированных AI-испытаний. По умолчанию просмотр; --apply ставит платные задачи.'
     def add_arguments(self,p):
         p.add_argument('--legal-entity',required=True);p.add_argument('--limit',type=int,default=30)
-        p.add_argument('--mode',choices=['both','baseline','guided'],default='both');p.add_argument('--apply',action='store_true')
+        p.add_argument('--mode',choices=['both','baseline','guided'],default='guided');p.add_argument('--apply',action='store_true')
     @transaction.atomic
     def handle(self,*args,**o):
         if not 1<=o['limit']<=50: raise CommandError('Размер партии от 1 до 50.')

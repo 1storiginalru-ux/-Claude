@@ -24,7 +24,7 @@ def case_subject(case):
     source = {'description': sections} if case.account.platform == 'ym' else ({'text':sections.get('comment'), 'pros':sections.get('advantages'), 'cons':sections.get('disadvantages')} if case.account.platform == 'wb' else {})
     return SimpleNamespace(pk=None, account=case.account, account_id=case.account_id, product=case.product,
         product_id=case.product_id, text=case.text, rating=case.rating, kind=case.kind,
-        sku=case.product.code if case.product_id else '', source_data=source)
+        sku=case.product.code if case.product_id else '', source_data=source, customer=case.customer)
 
 
 def prepare_case(case, mode, model=''):
@@ -44,7 +44,8 @@ def enqueue_test(case, actor, *, mode='guided', model='', force=False):
     if mode not in {'guided','baseline'} or not case.account.enabled or case.account.company.is_demo: raise AIProblem('Выберите подключённый реальный кабинет и режим испытания.')
     if case.product_id and case.product.company_id != case.account.company_id: raise AIProblem('Товар относится к другой компании.')
     source, config, snapshot = prepare_case(case,mode,model)
-    validate_settings(snapshot)
+    routing = plan(case_subject(case),library=snapshot['reply_library'],available_materials=snapshot['available_materials'])
+    if mode == 'baseline' or routing['action'] == 'ai': validate_settings(snapshot)
     AIJob.objects.filter(test_case=case,status__in=['queued','running','retry','blocked']).exclude(source_fingerprint=source).update(status='cancelled',lease_token=None,lease_until=None,error='Испытание изменилось.')
     job,created = AIJob.objects.get_or_create(test_case=case,source_fingerprint=source,config_fingerprint=config, defaults={'actor':actor,'snapshot':snapshot})
     if not created and (force and job.status=='done' or job.status in {'failed','cancelled','blocked'}):

@@ -6,14 +6,16 @@ TOPICS = [('', 'Любая тема'), *[(s, signal_label(s)) for s in [*PRODUCT
 
 class MaterialForm(forms.ModelForm):
     topic = forms.ChoiceField(label='Тема', choices=TOPICS, required=False)
+    covered_topics = forms.MultipleChoiceField(label='Дополнительные темы, на которые отвечает шаблон', choices=TOPICS[1:], required=False)
     class Meta:
         model = ReplyMaterial
-        fields = ['kind', 'title', 'customer_text', 'answer', 'explanation', 'topic', 'sentiment', 'thread_kind', 'platform', 'product_code', 'brand', 'excluded_words', 'active', 'approved']
+        fields = ['kind', 'title', 'customer_text', 'answer', 'explanation', 'topic', 'covered_topics', 'sentiment', 'thread_kind', 'platform', 'product_code', 'brand', 'excluded_words', 'active', 'approved']
         labels = {'sentiment': 'Тональность', 'thread_kind': 'Тип обращения', 'platform': 'Площадка', 'active': 'Использовать', 'approved': 'Подтверждено руководителем'}
         widgets = {name: forms.Textarea(attrs={'rows': 3}) for name in ['customer_text','answer','explanation','excluded_words']}
     def __init__(self, *args, company, **kwargs):
         super().__init__(*args, **kwargs); self.company = company
         self.fields['kind'].help_text = 'Пример направляет формулировки AI. Готовый шаблон подставляется без генерации только через сценарий с действием «Готовый шаблон».'
+        self.fields['answer'].help_text = 'Начните готовый шаблон с {{приветствие}}: подставится «Здравствуйте, Анна!» или «Здравствуйте!». Имя берётся только из данных площадки. Подстановки товара: {{товар}}, {{бренд}}, {{объем}}.'
     def clean(self):
         data = super().clean()
         if data.get('kind') == 'example' and not data.get('customer_text'): self.add_error('customer_text', 'Для примера нужен текст обращения.')
@@ -74,7 +76,7 @@ class FactForm(forms.ModelForm):
 class TestCaseForm(forms.ModelForm):
     class Meta:
         model = ReplyTestCase
-        fields = ['account','title','kind','text','rating','product','expected_answer']
+        fields = ['account','title','kind','customer','text','rating','product','expected_answer']
         labels = {'account':'Кабинет', 'kind':'Тип обращения', 'rating':'Оценка', 'product':'Товар'}
         widgets = {'text': forms.Textarea(attrs={'rows':4}), 'expected_answer': forms.Textarea(attrs={'rows':3})}
     def __init__(self, *args, scope, **kwargs):

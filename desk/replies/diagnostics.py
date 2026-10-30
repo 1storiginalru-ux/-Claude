@@ -20,7 +20,8 @@ def saved_context(draft):
             'rule': explanation.get('rule'), 'template': template,
             'template_answer': original_template['answer'] if original_template else '',
             'examples': examples, 'style_chars': len(snapshot.get('tone_of_voice', '')),
-            'facts': explanation.get('facts', snapshot.get('facts', [])), 'notes': explanation.get('notes', [])}
+            'facts': explanation.get('facts', snapshot.get('facts', [])), 'notes': explanation.get('notes', []),
+            'greeting': snapshot.get('customer_greeting',''), 'strict_templates': snapshot.get('strict_templates',False)}
 
 
 def current_selection(subject):

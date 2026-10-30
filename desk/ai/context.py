@@ -6,7 +6,7 @@ from django.db.models import Q
 from desk.models import KnowledgeEntry
 from .classification import local_classify, review_sections
 
-PIPELINE_VERSION = 'voice-ai-4.1'
+PIPELINE_VERSION = 'voice-ai-5.0'
 
 
 def digest(value):
@@ -68,6 +68,7 @@ def fact_score(text, title, query, platform, needs_return):
 
 
 def prepare(thread, *, history_override=None, mode='guided', materials_override=None):
+    from desk.replies.greetings import greeting
     company = thread.account.company
     source = source_context(thread)
     code = thread.product.code if thread.product_id else ''
@@ -120,13 +121,15 @@ def prepare(thread, *, history_override=None, mode='guided', materials_override=
                 'folder': company.ai_folder_id, 'key_env': company.ai_key_env,
                 'tone_of_voice': company.tone_of_voice, 'working_style': company.ai_working_style, 'knowledge': company.knowledge,
                 'entries': entries, 'operator_assessment': decision, 'history': history,
-                'available_materials': materials, 'reply_library': library, 'mode': mode, 'version': PIPELINE_VERSION}
+                'available_materials': materials, 'reply_library': library, 'mode': mode, 'version': PIPELINE_VERSION,
+                'strict_templates': company.reply_sensitive_templates, 'customer_greeting': greeting(thread)}
     snapshot = {'source': source, 'provider': company.ai_provider, 'model': company.ai_model,
                 'folder': company.ai_folder_id, 'key_env': company.ai_key_env,
                 'tone_of_voice': style, 'facts': selected, 'history': history,
                 'operator_assessment': decision, 'available_materials': materials,
-                'reply_library': library, 'mode': mode, 'version': PIPELINE_VERSION}
-    return digest(source), digest(settings), snapshot
+                'reply_library': library, 'mode': mode, 'version': PIPELINE_VERSION,
+                'strict_templates': company.reply_sensitive_templates, 'customer_greeting': greeting(thread)}
+    return source_digest(thread), digest(settings), snapshot
 
 
 def draft_is_current(thread, analysis):

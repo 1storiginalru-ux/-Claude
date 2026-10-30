@@ -61,7 +61,7 @@ def library_state(thread):
                      .filter(Q(thread_kind='')|Q(thread_kind=thread.kind))
                      .filter(Q(brand='')|Q(brand__iexact=product.brand if product else ''))
                      .order_by('pk').values('id', 'kind', 'title', 'customer_text', 'answer', 'explanation',
-                     'topic', 'sentiment', 'thread_kind', 'platform', 'product_code', 'brand', 'excluded_words', 'version'))
+                     'topic', 'covered_topics', 'sentiment', 'thread_kind', 'platform', 'product_code', 'brand', 'excluded_words', 'version'))
     rules = []
     for rule in ReplyRule.objects.filter(company=company, active=True).prefetch_related('accounts').order_by('priority', 'pk'):
         rules.append({'id': rule.pk, 'name': rule.name, 'priority': rule.priority, 'conditions': rule.conditions,
@@ -118,15 +118,22 @@ def plan(thread, *, data=None, library=None, available_materials=None):
         available_materials = {'photos': len(content['photos']), 'videos': len(content['videos'])}
     eligible = [m for m in materials if material_matches(m, thread, data)]
     applicable = [r for r in rules if rule_matches(r, thread, data, available_materials)]
+    strict = thread.account.company.reply_sensitive_templates and data['sentiment'] == 'negative'
+    if strict: applicable = [r for r in applicable if r['action'] != 'ai']
     selected = applicable[0] if applicable else None
     action = selected['action'] if selected else 'ai'
     template = next((m for m in eligible if m['kind'] == 'template' and selected and m['id'] == selected['material_id']), None)
     notes = []
     if action == 'template' and not template:
-        action = 'ai'; notes.append('Шаблон сценария недоступен или не подходит этому обращению. Подготовлен AI-черновик для проверки.')
-    if action == 'template' and human_only(data) and any(not template['topic'] or not matches([s],template['topic']) for s in grouped_signals(data['signals'])):
-        action='ai';template=None
-        notes.append('Шаблон не покрывает все чувствительные темы обращения. AI учитывает жалобу целиком; решение принимает сотрудник.')
+        action = 'manual' if strict else 'ai'
+        notes.append('Шаблон сценария недоступен или не подходит этому обращению. ' + ('Нужен ответ сотрудника; свободная генерация отключена.' if strict else 'Подготовлен AI-черновик для проверки.'))
+    coverage = set(template.get('covered_topics', [])) | {template['topic']} if template else set()
+    if action == 'template' and (strict or human_only(data)) and any(not any(matches([s], topic) for topic in coverage) for s in grouped_signals(data['signals'])):
+        action='manual' if strict else 'ai';template=None
+        notes.append('Шаблон не покрывает все темы жалобы. ' + ('Обращение передано сотруднику без генерации.' if strict else 'AI учитывает жалобу целиком; решение принимает сотрудник.'))
+    if strict and (action == 'ai' or data['severity'] == 'P0' or not data['signals']):
+        action='manual';template=None
+        notes.append('Негатив: разрешён только подходящий утверждённый шаблон. Для этого случая нужен ответ сотрудника; AI-текст не создаётся.')
     query = words(thread.text)
     concerns = wording_concerns(thread.text)
     examples = [m for m in eligible if m['kind'] == 'example']
@@ -136,7 +143,7 @@ def plan(thread, *, data=None, library=None, available_materials=None):
         return len(query & words(material['customer_text'])) + bool(material['topic']) * 5 + bool(material['product_code']) * 10 + semantic
     examples.sort(key=lambda m: (-relevance(m), m['id']))
     return {'action': action, 'rule': selected, 'template': template, 'examples': examples[:3], 'notes': notes,
-            'requires_human': bool(data.get('requires_human') or human_only(data) or data.get('confidence', 0) < .7),
+            'requires_human': bool(strict or data.get('requires_human') or human_only(data) or data.get('confidence', 0) < .7),
             'situation': data['sentiment'], 'all_topics': data['signals']}
 
 
@@ -148,8 +155,9 @@ def public_plan(value):
 
 
 def template_text(material, thread):
+    from .greetings import apply_greeting
     product = thread.product if thread.product_id else None
     text = material['answer']
     for key, value in {'товар': product.name if product else '', 'бренд': product.brand if product else '', 'объем': product.volume if product else ''}.items():
         if value: text = text.replace('{{' + key + '}}', value)
-    return text
+    return apply_greeting(text, thread)

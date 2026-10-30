@@ -57,7 +57,7 @@ class ReplyWorkbenchTests(AIConfiguredCase):
 
     @patch('desk.ai.queue.complete')
     def test_negative_trial_template_scenario_substitutes_exact_text_without_ai(self, complete):
-        material=self.material(kind='template',sentiment='negative',topic='LONG_AUTH',answer='Точный утверждённый ответ.')
+        material=self.material(kind='template',sentiment='negative',topic='LONG_AUTH',answer='Здравствуйте! Точный утверждённый ответ.')
         self.rule(action='template',material=material,conditions={'sentiment':'negative','signals':['LONG_AUTH']})
         case=ReplyTestCase.objects.create(account=self.ym,title='Тест шаблона',rating=2,text='Не стойкий, не оригинал',product=self.product)
         job=enqueue_test(case,self.user);process_one();job.refresh_from_db()
@@ -452,5 +452,5 @@ class ReplyWorkbenchTests(AIConfiguredCase):
         call_command('enqueue_reply_tests',legal_entity='АМ',stdout=StringIO())
         self.assertFalse(AIJob.objects.exists())
         for _ in range(2):call_command('enqueue_reply_tests',legal_entity='АМ',apply=True,stdout=StringIO())
-        self.assertEqual(AIJob.objects.count(),2)
+        self.assertEqual(AIJob.objects.count(),1)
         self.assertFalse(other.ai_jobs.exists());self.assertFalse(Outgoing.objects.exists());self.assertFalse(AIRequest.objects.exists())

@@ -1,9 +1,12 @@
 <details class="reply-context">
   <summary>Как подготовлен ответ</summary>
   <p class="muted">{{ result.trace.method }} · {{ result.trace.pipeline }} · стиль: {{ result.trace.style_chars }} символов</p>
+  {% if result.trace.greeting %}<p>Приветствие: {{ result.trace.greeting }}</p>{% endif %}
+  {% if result.trace.strict_templates %}<p>Негатив: готовый шаблон или ответ сотрудника.</p>{% endif %}
   {% if result.trace.rule %}<p>Сценарий: {{ result.trace.rule.name }} · версия {{ result.trace.rule.version }}</p>{% else %}<p>Сценарий не выбран.{% if result.trace.mode == 'baseline' %} Прежний подход не использует сценарии и библиотеку.{% endif %}</p>{% endif %}
   {% if result.trace.template %}
     <p>Подставлен шаблон: {{ result.trace.template.title }} · версия {{ result.trace.template.version }}</p>
+    <p class="muted">Текст подставлен локально. AI не переписывал шаблон.</p>
     <p>{{ result.trace.template_answer|linebreaksbr }}</p>
   {% elif result.trace.action == 'ai' %}
     {% for example in result.trace.examples %}
@@ -13,7 +16,7 @@
     <p class="muted">Примеры направляют формулировки AI и адаптируются. Дословный текст задаётся готовым шаблоном через сценарий.</p>
   {% else %}<p>Генерация не выполнялась: ответ готовит сотрудник.</p>{% endif %}
   {% for note in result.trace.notes %}<p>{{ note }}</p>{% endfor %}
-  <details><summary>Подтверждённые факты, доступные для ответа ({{ result.trace.facts|length }})</summary>
+  {% if result.trace.action == 'ai' %}<details><summary>Подтверждённые факты, доступные для ответа ({{ result.trace.facts|length }})</summary>
     {% for fact in result.trace.facts %}<p>{{ fact.text|linebreaksbr }}</p>{% empty %}<p>Факты не подобраны.</p>{% endfor %}
-  </details>
+  </details>{% endif %}
 </details>

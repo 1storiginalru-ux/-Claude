@@ -2,6 +2,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from desk.models import Thread, ReplyTestCase, Audit
 from desk.replies.service import case_sections
+from desk.replies.greetings import marketplace_author
 
 class Command(BaseCommand):
     help='Скопировать реальные обращения в изолированный пилот. Без AI и изменения Inbox, по умолчанию просмотр.'
@@ -27,7 +28,7 @@ class Command(BaseCommand):
         for t in selected:
             self.stdout.write(f'{t.pk}: {t.account.name}, {t.kind}, {t.rating or "—"} ★, ProductID {t.product.code if t.product else "—"}')
             if o['apply']:
-                _,created=ReplyTestCase.objects.get_or_create(source_thread=t,defaults={'account':t.account,'product':t.product,'title':f'Обращение №{t.pk}','kind':t.kind,'text':t.text,'rating':t.rating,'review_sections':case_sections(t)})
+                _,created=ReplyTestCase.objects.get_or_create(source_thread=t,defaults={'account':t.account,'product':t.product,'title':f'Обращение №{t.pk}','kind':t.kind,'customer':marketplace_author(t)[:120],'text':t.text,'rating':t.rating,'review_sections':case_sections(t)})
                 count+=created
         if o['apply']:
             for company_id in {t.account.company_id for t in selected}: Audit.objects.create(company_id=company_id,action='reply.pilot.prepared',after={'selected':[t.pk for t in selected if t.account.company_id==company_id]})

@@ -155,7 +155,8 @@ def thread_action(request, pk):
             from .models import ReplyTestCase
             from .replies.service import case_sections
             require_role(request.user,thread.account.company_id,['supervisor','quality'])
-            case,_=ReplyTestCase.objects.get_or_create(source_thread=thread,defaults={'account':thread.account,'product':thread.product,'kind':thread.kind,'text':thread.text,'rating':thread.rating,'review_sections':case_sections(thread),'title':f'Обращение №{thread.pk}','created_by':request.user})
+            from desk.replies.greetings import marketplace_author
+            case,_=ReplyTestCase.objects.get_or_create(source_thread=thread,defaults={'account':thread.account,'product':thread.product,'kind':thread.kind,'customer':marketplace_author(thread)[:120],'text':thread.text,'rating':thread.rating,'review_sections':case_sections(thread),'title':f'Обращение №{thread.pk}','created_by':request.user})
             messages.success(request,'Случай сохранён в испытаниях. AI ещё не вызывался.')
             return redirect('reply_tests')
         elif action == 'analyze':
