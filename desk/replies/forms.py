@@ -13,6 +13,7 @@ class MaterialForm(forms.ModelForm):
         widgets = {name: forms.Textarea(attrs={'rows': 3}) for name in ['customer_text','answer','explanation','excluded_words']}
     def __init__(self, *args, company, **kwargs):
         super().__init__(*args, **kwargs); self.company = company
+        self.fields['kind'].help_text = 'Пример направляет формулировки AI. Готовый шаблон подставляется без генерации только через сценарий с действием «Готовый шаблон».'
     def clean(self):
         data = super().clean()
         if data.get('kind') == 'example' and not data.get('customer_text'): self.add_error('customer_text', 'Для примера нужен текст обращения.')

@@ -6,7 +6,7 @@ from django.db.models import Q
 from desk.models import KnowledgeEntry
 from .classification import local_classify, review_sections
 
-PIPELINE_VERSION = 'voice-ai-4.0'
+PIPELINE_VERSION = 'voice-ai-4.1'
 
 
 def digest(value):

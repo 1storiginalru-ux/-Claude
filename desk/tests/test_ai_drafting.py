@@ -11,6 +11,13 @@ from .test_ai_queue import AIConfiguredCase, NEGATIVE, POSITIVE
 
 
 class DraftingTests(AIConfiguredCase):
+    def test_guided_instructions_do_not_require_a_contact_promise_but_baseline_is_preserved(self):
+        from desk.ai.drafting import DRAFTER, BASELINE_DRAFTER
+        old_requirement='В незавершённой проблемной ситуации нужен ближайший шаг и выполнимый следующий\nконтакт.'
+        self.assertIn(old_requirement,BASELINE_DRAFTER)
+        self.assertNotIn(old_requirement,DRAFTER)
+        self.assertIn('Первый пример — основной',DRAFTER)
+
     @patch('desk.ai.queue.complete')
     def test_negative_human_only_includes_style_facts_and_separate_operator_notes(self, complete):
         self.thread.text = 'Не стойкий, хочу вернуть'; self.thread.save()

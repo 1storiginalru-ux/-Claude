@@ -20,6 +20,99 @@ class ReplyWorkbenchTests(AIConfiguredCase):
     def supervisor(self):
         Membership.objects.filter(user=self.user,company=self.company).update(role='supervisor');self.client.force_login(self.user)
 
+    @patch('desk.ai.queue.complete')
+    def test_screenshot_longevity_example_is_sent_to_guided_ai_but_not_substituted(self, complete):
+        case=ReplyTestCase.objects.create(account=self.ym,title='Обращение №18452',rating=2,product=self.product,
+            text='На пару часов хватает, потом выветривается полностью, не оригинал, пустая трата денег')
+        material=self.material(title='Образец: Слабая стойкость',sentiment='negative',topic='LONG_AUTH',
+            customer_text='Красивый аромат, но держится совсем недолго.',answer='APPROVED_LONGEVITY_WORDING')
+        authenticity=self.material(title='Образец: Сомнение в оригинальности',sentiment='negative',topic='LONG_AUTH',
+            customer_text='Есть сомнения, что это оригинал.',answer='APPROVED_AUTHENTICITY_WORDING')
+        self.material(company=self.other,title='PRIVATE_OTHER_EXAMPLE',sentiment='negative',topic='LONG_AUTH')
+        complete.return_value=self.answer({'draft':'Адаптированный ответ модели','used_fact_ids':[]})
+        enqueue_test(case,self.user,mode='baseline');enqueue_test(case,self.user,mode='guided')
+        process_one();process_one()
+        old_context,new_context=[call.args[2] for call in complete.call_args_list]
+        self.assertEqual(old_context['reply_examples'],[])
+        self.assertEqual([row['id'] for row in new_context['reply_examples']],[material.pk,authenticity.pk])
+        self.assertNotIn('PRIVATE_OTHER_EXAMPLE',json.dumps(new_context))
+        guided=ReplyDraft.objects.get(test_case=case,method='ai_example')
+        self.assertEqual(guided.text,'Адаптированный ответ модели')
+        self.assertEqual(guided.explanation['examples'][0]['id'],material.pk)
+        self.assertFalse(guided.explanation['template'])
+        self.assertFalse(Outgoing.objects.exists());self.assertFalse(Analysis.objects.exists())
+
+    def test_example_order_follows_complaints_without_changing_analytics_or_treating_praise_as_complaint(self):
+        from desk.ai.classification import local_classify
+        longevity=self.material(title='Слабая стойкость',sentiment='negative',topic='LONG_AUTH',customer_text='Держится совсем недолго.')
+        authenticity=self.material(title='Сомнение в оригинальности',sentiment='negative',topic='LONG_AUTH',customer_text='Это не оригинал.')
+        for text,first in [('Не оригинал, аромат не держится',authenticity),
+                           ('Стойкость отличная, но не оригинал',authenticity),
+                           ('Не стойкий, но не подделка',longevity)]:
+            with self.subTest(text=text):
+                self.thread.text=text;self.thread.rating=2;self.thread.save()
+                before=local_classify(text,2)
+                self.assertEqual(plan(self.thread)['examples'][0]['id'],first.pk)
+                self.assertEqual(local_classify(text,2),before)
+
+    @patch('desk.ai.queue.complete')
+    def test_negative_trial_template_scenario_substitutes_exact_text_without_ai(self, complete):
+        material=self.material(kind='template',sentiment='negative',topic='LONG_AUTH',answer='Точный утверждённый ответ.')
+        self.rule(action='template',material=material,conditions={'sentiment':'negative','signals':['LONG_AUTH']})
+        case=ReplyTestCase.objects.create(account=self.ym,title='Тест шаблона',rating=2,text='Не стойкий, не оригинал',product=self.product)
+        job=enqueue_test(case,self.user);process_one();job.refresh_from_db()
+        self.assertEqual(job.status,'done');complete.assert_not_called()
+        draft=ReplyDraft.objects.get();self.assertEqual(draft.text,material.answer);self.assertEqual(draft.method,'template')
+        self.assertEqual(draft.explanation['template']['id'],material.pk)
+        self.assertFalse(AIRequest.objects.exists());self.assertFalse(Outgoing.objects.exists())
+
+    @patch('desk.ai.queue.complete')
+    def test_saved_trial_context_shows_frozen_example_version_and_escapes_content(self, complete):
+        from desk.replies.diagnostics import saved_context
+        material=self.material(answer='<script>FROZEN_EXAMPLE</script>')
+        case=ReplyTestCase.objects.create(account=self.account,title='Тест',text=self.thread.text,rating=5,product=self.product)
+        complete.return_value=self.answer({'draft':'Ответ модели','used_fact_ids':[]})
+        enqueue_test(case,self.user);process_one()
+        material.answer='NEW_EXAMPLE';material.version+=1;material.save()
+        result=ReplyDraft.objects.select_related('job').get()
+        trace=saved_context(result)
+        self.assertEqual(trace['examples'][0]['version'],1)
+        self.assertEqual(trace['examples'][0]['answer'],'<script>FROZEN_EXAMPLE</script>')
+        self.client.force_login(self.user)
+        page=self.client.get(reverse('reply_tests'))
+        self.assertContains(page,'Как подготовлен ответ');self.assertContains(page,'Основной пример')
+        self.assertContains(page,'&lt;script&gt;FROZEN_EXAMPLE&lt;/script&gt;')
+        self.assertNotContains(page,'<script>FROZEN_EXAMPLE</script>')
+        self.assertNotContains(page,'NEW_EXAMPLE')
+
+    @patch('desk.ai.queue.complete')
+    def test_explain_command_is_free_read_only_and_compares_saved_and_current_selection(self, complete):
+        material=self.material(title='APPROVED_LOCAL_EXAMPLE')
+        rejected=self.material(title='UNAPPROVED_LOCAL_EXAMPLE',approved=False)
+        self.material(company=self.other,title='PRIVATE_OTHER_MATERIAL')
+        case=ReplyTestCase.objects.create(account=self.account,title='Тест',text=self.thread.text,rating=5,product=self.product,source_thread=self.thread)
+        complete.return_value=self.answer({'draft':'Ответ модели','used_fact_ids':[]})
+        enqueue_test(case,self.user);process_one()
+        material.approved=False;material.save()
+        counts=[model.objects.count() for model in [ReplyDraft,AIRequest,Audit,Analysis,Outgoing]]
+        output=StringIO();call_command('explain_reply',thread=self.thread.pk,stdout=output)
+        text=output.getvalue()
+        self.assertIn('Сохранённый вариант',text);self.assertIn('Примеры, переданные AI: #',text)
+        self.assertIn('APPROVED_LOCAL_EXAMPLE',text);self.assertIn('UNAPPROVED_LOCAL_EXAMPLE',text)
+        self.assertIn('не подтверждён',text);self.assertNotIn('PRIVATE_OTHER_MATERIAL',text)
+        self.assertEqual(complete.call_count,1)
+        self.assertEqual(counts,[model.objects.count() for model in [ReplyDraft,AIRequest,Audit,Analysis,Outgoing]])
+
+    def test_material_rejection_explains_scope_and_unrouted_template(self):
+        from desk.replies.diagnostics import current_selection
+        self.material(platform='ym',title='WRONG_PLATFORM')
+        self.material(approved=False,title='NOT_APPROVED')
+        self.material(kind='template',title='NO_SCENARIO')
+        selection={m['title']:m['status'] for m in current_selection(self.thread)['candidates']}
+        self.assertEqual(selection['WRONG_PLATFORM'],'другая площадка')
+        self.assertEqual(selection['NOT_APPROVED'],'не подтверждён')
+        self.assertIn('не выбран действием сценария',selection['NO_SCENARIO'])
+
     def test_library_filters_company_product_platform_approval_sentiment_and_exclusion(self):
         wanted=self.material()
         for changes in [{'company':self.other},{'product_code':'P2'},{'platform':'ym'},{'approved':False},{'active':False},{'sentiment':'negative'},{'excluded_words':'понравилось'}]:self.material(**changes)

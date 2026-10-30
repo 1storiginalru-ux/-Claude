@@ -5,6 +5,28 @@ from desk.models import ReplyMaterial, ReplyRule
 from desk.voc.rules import human_only, matches, grouped_signals
 from desk.reviews import assessment_is_current
 from desk.ai.classification import local_classify, review_sections
+from desk.ai.classification import COMPILED, SUPPRESS, normalize
+
+
+# Retrieval only: these expressions rank examples, never classify reviews or
+# create analytics signals. Keep explicit negation and the actual complaint.
+LONGEVITY_WORDING = [re.compile(pattern) for pattern in [
+    r'\b(?:держ\w*|хвата\w*).{0,20}\bнедолго\b',
+    r'\b(?:слаб\w*|низк\w*)\s+стойкост\w*\b',
+    r'\bна\s+(?:пару|два|2)\s+час\w*\s+хвата\w*.{0,50}(?:выветр\w*|исчез\w*|пропа\w*)',
+]]
+
+
+def wording_concerns(text):
+    text = normalize(text)
+    for pattern in SUPPRESS:
+        text = pattern.sub(lambda match: ' ' * len(match.group()), text)
+    positions = {}
+    for concern, patterns in COMPILED.items():
+        for pattern in [*patterns, *(LONGEVITY_WORDING if concern == 'LONG' else [])]:
+            match = pattern.search(text)
+            if match: positions[concern] = min(positions.get(concern, len(text)), match.start())
+    return sorted(positions, key=lambda concern: (positions[concern], concern))
 
 
 def lines(value): return [x.strip() for x in value.splitlines() if x.strip()]
@@ -48,15 +70,24 @@ def library_state(thread):
     return materials, rules
 
 
-def material_matches(material, thread, data):
+def material_mismatch_reasons(material, thread, data):
     product = thread.product if thread.product_id else None
-    return (not material['platform'] or material['platform'] == thread.account.platform) and (
-        not material['thread_kind'] or material['thread_kind'] == thread.kind) and (
-        not material['sentiment'] or material['sentiment'] == data['sentiment']) and (
-        not material['topic'] or matches(data['signals'], material['topic'])) and (
-        not material['product_code'] or product and material['product_code'] == product.code) and (
-        not material['brand'] or product and normalized(material['brand']) == normalized(product.brand)) and (
-        not any(contains(thread.text, phrase) for phrase in lines(material['excluded_words'])))
+    checks = [
+        (material.get('approved', True), 'не подтверждён'),
+        (material.get('active', True), 'выключен'),
+        (not material['platform'] or material['platform'] == thread.account.platform, 'другая площадка'),
+        (not material['thread_kind'] or material['thread_kind'] == thread.kind, 'другой тип обращения'),
+        (not material['sentiment'] or material['sentiment'] == data['sentiment'], 'другая тональность'),
+        (not material['topic'] or matches(data['signals'], material['topic']), 'тема не совпала'),
+        (not material['product_code'] or product and material['product_code'] == product.code, 'другой ProductID'),
+        (not material['brand'] or product and normalized(material['brand']) == normalized(product.brand), 'другой бренд'),
+        (not any(contains(thread.text, phrase) for phrase in lines(material['excluded_words'])), 'найдена исключающая фраза'),
+    ]
+    return [reason for passed, reason in checks if not passed]
+
+
+def material_matches(material, thread, data):
+    return not material_mismatch_reasons(material, thread, data)
 
 
 def rule_matches(rule, thread, data, materials):
@@ -97,8 +128,13 @@ def plan(thread, *, data=None, library=None, available_materials=None):
         action='ai';template=None
         notes.append('Шаблон не покрывает все чувствительные темы обращения. AI учитывает жалобу целиком; решение принимает сотрудник.')
     query = words(thread.text)
+    concerns = wording_concerns(thread.text)
     examples = [m for m in eligible if m['kind'] == 'example']
-    examples.sort(key=lambda m: (-(len(query & words(m['customer_text'])) + bool(m['topic']) * 5 + bool(m['product_code']) * 10), m['id']))
+    def relevance(material):
+        similar = set(wording_concerns(material['customer_text'] + '\n' + material['title']))
+        semantic = len(set(concerns) & similar) * 4 + (6 if concerns and concerns[0] in similar else 0)
+        return len(query & words(material['customer_text'])) + bool(material['topic']) * 5 + bool(material['product_code']) * 10 + semantic
+    examples.sort(key=lambda m: (-relevance(m), m['id']))
     return {'action': action, 'rule': selected, 'template': template, 'examples': examples[:3], 'notes': notes,
             'requires_human': bool(data.get('requires_human') or human_only(data) or data.get('confidence', 0) < .7),
             'situation': data['sentiment'], 'all_topics': data['signals']}

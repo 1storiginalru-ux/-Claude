@@ -15,6 +15,7 @@ from desk.models import Account, Audit, KnowledgeEntry, Membership, ReplyDraft, 
 from desk.views import context
 from .forms import MaterialForm, RuleForm, FactForm, TestCaseForm
 from .service import draft_current, enqueue_test
+from .diagnostics import saved_context
 
 
 def manager(user, company):
@@ -146,7 +147,9 @@ def tests(request):
     cases=Paginator(ReplyTestCase.objects.filter(account__company__in=scope).select_related('account__company','product').order_by('-pk'),10).get_page(request.GET.get('page'))
     for item in cases:
         item.results=list(item.reply_drafts.select_related('job').order_by('-pk')[:6])
-        for result in item.results: result.current=draft_current(result)
+        for result in item.results:
+            result.current=draft_current(result)
+            result.trace=saved_context(result)
         item.jobs=item.ai_jobs.order_by('-pk')[:4]
     return render(request,'desk/replies/tests.html',context(request,form=form,items=cases))
 
