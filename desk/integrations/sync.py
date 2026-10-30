@@ -130,10 +130,10 @@ def sync_account(account):
                     defaults = local_classify(thread.text, thread.rating, sections=review_sections(thread), kind=thread.kind)
                     Analysis.objects.update_or_create(thread=thread, defaults={**defaults, 'provider': 'rules', 'model': '',
                         'prompt_version': RULES_VERSION, 'source_fingerprint': '', 'evidence': {}})
-                if company.ai_auto_enabled and needs_analysis:
+                if company.ai_auto_enabled and account.ai_auto_enabled and needs_analysis and thread.kind == 'review':
                     try:
-                        from desk.ai.queue import enqueue
-                        enqueue(thread)
+                        from desk.replies.service import prepare_reply
+                        prepare_reply(thread, None, retry_failed=False)
                     except AIProblem: analysis_errors += 1
                 return
             if changed or not hasattr(thread, 'analysis'):

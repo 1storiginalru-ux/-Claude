@@ -31,7 +31,7 @@ class KnowledgeAdmin(AuditedAdmin):
 
 @admin.register(Account)
 class AccountAdmin(AuditedAdmin):
-    list_display = ['name', 'company', 'platform', 'enabled', 'sales_enabled', 'history_enabled', 'last_sync']
+    list_display = ['name', 'company', 'platform', 'enabled', 'ai_auto_enabled', 'sales_enabled', 'history_enabled', 'last_sync']
     readonly_fields = ['last_sync', 'sync_status']
 
 

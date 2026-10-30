@@ -68,7 +68,7 @@ def store_result(job, data, notes, routing, *, method='ai'):
 
 
 @transaction.atomic
-def prepare_reply(thread, actor, *, another=False):
+def prepare_reply(thread, actor, *, another=False, retry_failed=True):
     thread = Thread.objects.select_for_update(of=('self',),no_key=True).select_related('account__company','product','assessment').get(pk=thread.pk)
     if not thread.account.enabled or thread.account.company.is_demo: raise AIProblem('Кабинет выключен или демонстрационный.')
     source, config, snapshot = prepare(thread)
@@ -87,7 +87,7 @@ def prepare_reply(thread, actor, *, another=False):
         Audit.objects.create(company=thread.account.company,actor=actor,action='reply.draft.created',object_id=str(draft.pk),after={'method':method,'scenario':draft.explanation})
         return draft
     from desk.ai.queue import enqueue
-    return enqueue(thread,actor,force=another,retry_failed=True,draft_only=another)
+    return enqueue(thread,actor,force=another,retry_failed=retry_failed,draft_only=another)
 
 
 def draft_current(draft):

@@ -60,6 +60,10 @@ class Account(models.Model):
     business_id = models.CharField('Business ID (Яндекс)', max_length=40, blank=True, validators=[RegexValidator(r'^\d*$')])
     ozon_client_id = models.CharField('Client-Id (Ozon)', max_length=40, blank=True, validators=[RegexValidator(r'^\d*$')])
     enabled = models.BooleanField(default=False)
+    ai_auto_enabled = models.BooleanField('Автоподготовка черновиков этого кабинета', default=True,
+        help_text='Работает вместе с включённой автоподготовкой компании. Позволяет исключить отдельные кабинеты общей компании.')
+    reply_signature = models.CharField('Утверждённая подпись магазина', max_length=500, blank=True,
+        help_text='Подстановка {{утверждённая_подпись}} в готовом шаблоне. Имя проверившего сотрудника заполняется перед отправкой.')
     sales_enabled = models.BooleanField('Получать продажи через API (WB / Маркет)', default=False)
     history_enabled = models.BooleanField('Догружать историю до 100 выкупов', default=True,
         help_text='Продажи WB и отзывы за соответствующий период, до 90 дней. Текущий опрос остаётся отдельным.')

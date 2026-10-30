@@ -2,14 +2,15 @@ import json
 import tempfile
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import override_settings
 from django.urls import reverse
+from django.utils import timezone
 from desk.ai.context import prepare, source_digest
 from desk.ai.queue import enqueue, process_one
-from desk.models import AIJob, AIRequest, Analysis, Audit, Membership, Outgoing, ReplyDraft, ReplyMaterial, ReplyRule, ReplyTestCase
+from desk.models import AIJob, AIRequest, Analysis, Audit, Membership, Outgoing, ReplyDraft, ReplyMaterial, ReplyRule, ReplyTestCase, SyncState
 from desk.replies.greetings import customer_name, greeting
 from desk.replies.policy import plan, template_text
 from desk.replies.service import prepare_reply, enqueue_test, draft_current
@@ -30,6 +31,40 @@ class StrictReplyTests(AIConfiguredCase):
         ReplyRule.objects.create(company=self.company,name='Стойкость',priority=10,action='template',material=material,
             conditions={'kind':'review','sentiment':'negative','signals':['LONG_AUTH']})
         return material
+
+    @patch('desk.integrations.details.enrich_account',return_value=0)
+    @patch('desk.integrations.sync.get_adapter')
+    @patch('desk.ai.queue.complete')
+    def test_auto_polling_prepares_approved_template_immediately_and_never_calls_ai_inline(self, complete, adapter, enrich):
+        from desk.integrations.base import Incoming
+        from desk.integrations.sync import sync_account
+        self.template();self.company.ai_auto_enabled=True;self.company.save()
+        incoming=Incoming('new-auto-negative','review','Не стойкий, не оригинал','sku1',rating=2,customer='Анна',source_data={'userName':'Анна'})
+        adapter.return_value=Mock(completed_window=None,fetch=Mock(return_value=[incoming]))
+        sync_account(self.account)
+        draft=ReplyDraft.objects.get();self.assertEqual(draft.method,'template');self.assertTrue(draft.text.startswith('Здравствуйте, Анна!'))
+        SyncState.objects.filter(account=self.account).update(next_attempt=timezone.now())
+        sync_account(self.account)
+        self.assertEqual(ReplyDraft.objects.count(),1);complete.assert_not_called()
+        self.assertFalse(AIJob.objects.exists());self.assertFalse(AIRequest.objects.exists());self.assertFalse(Outgoing.objects.exists())
+
+    @patch('desk.integrations.details.enrich_account',return_value=0)
+    @patch('desk.integrations.sync.get_adapter')
+    @patch('desk.ai.queue.complete')
+    def test_account_gate_excludes_one_cabinet_of_shared_company(self, complete, adapter, enrich):
+        from desk.integrations.base import Incoming
+        from desk.integrations.sync import sync_account
+        self.company.ai_auto_enabled=True;self.company.save()
+        self.account.ai_auto_enabled=False;self.account.save()
+        incoming=Incoming('new-positive','review','Отличный аромат, спасибо','sku1',rating=5)
+        adapter.return_value=Mock(completed_window=None,fetch=Mock(return_value=[incoming]))
+        sync_account(self.account);self.assertFalse(AIJob.objects.exists())
+        sync_account(self.ym)
+        self.assertEqual(AIJob.objects.count(),1);self.assertEqual(AIJob.objects.get().thread.account_id,self.ym.pk)
+        incoming.kind='question';incoming.external_id='new-question';incoming.text='Какой объём?';incoming.rating=None
+        SyncState.objects.filter(account=self.ym).update(next_attempt=timezone.now())
+        sync_account(self.ym);self.assertEqual(AIJob.objects.count(),1)
+        complete.assert_not_called();self.assertFalse(Outgoing.objects.exists())
 
     @patch('desk.ai.queue.complete')
     def test_approved_negative_template_preserves_body_and_inserts_marketplace_name_without_ai(self, complete):

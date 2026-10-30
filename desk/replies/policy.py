@@ -158,6 +158,8 @@ def template_text(material, thread):
     from .greetings import apply_greeting
     product = thread.product if thread.product_id else None
     text = material['answer']
+    if thread.account.reply_signature:
+        text = text.replace('{{утверждённая_подпись}}',thread.account.reply_signature)
     for key, value in {'товар': product.name if product else '', 'бренд': product.brand if product else '', 'объем': product.volume if product else ''}.items():
         if value: text = text.replace('{{' + key + '}}', value)
     return apply_greeting(text, thread)

@@ -6,7 +6,7 @@ from django.db.models import Q
 from desk.models import KnowledgeEntry
 from .classification import local_classify, review_sections
 
-PIPELINE_VERSION = 'voice-ai-5.0'
+PIPELINE_VERSION = 'voice-ai-5.1'
 
 
 def digest(value):
@@ -122,7 +122,8 @@ def prepare(thread, *, history_override=None, mode='guided', materials_override=
                 'tone_of_voice': company.tone_of_voice, 'working_style': company.ai_working_style, 'knowledge': company.knowledge,
                 'entries': entries, 'operator_assessment': decision, 'history': history,
                 'available_materials': materials, 'reply_library': library, 'mode': mode, 'version': PIPELINE_VERSION,
-                'strict_templates': company.reply_sensitive_templates, 'customer_greeting': greeting(thread)}
+                'strict_templates': company.reply_sensitive_templates, 'customer_greeting': greeting(thread),
+                'reply_signature':thread.account.reply_signature}
     snapshot = {'source': source, 'provider': company.ai_provider, 'model': company.ai_model,
                 'folder': company.ai_folder_id, 'key_env': company.ai_key_env,
                 'tone_of_voice': style, 'facts': selected, 'history': history,
