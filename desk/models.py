@@ -180,6 +180,15 @@ class SalesSyncState(models.Model):
     status = models.CharField(max_length=240, blank=True)
 
 
+class AIBackfillState(models.Model):
+    account = models.OneToOneField(Account, on_delete=models.CASCADE, related_name='ai_backfill')
+    enabled = models.BooleanField(default=False)
+    before_pk = models.PositiveBigIntegerField(default=0)
+    next_attempt = models.DateTimeField(default=timezone.now)
+    status = models.CharField(max_length=240, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class YandexOrderState(models.Model):
     account = models.ForeignKey(Account,on_delete=models.PROTECT)
     campaign_id = models.CharField(max_length=40)

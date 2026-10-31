@@ -7,7 +7,7 @@ from django.utils import timezone
 from desk.integrations.base import IntegrationError
 from desk.integrations.rate_limit import scope_for
 from desk.integrations.wb_sales import WBSales, source_time, sync_wb_sales
-from desk.models import ApiThrottle, SaleEvent, SalesSyncState, SyncState
+from desk.models import ApiThrottle, Audit, SaleEvent, SalesSyncState, SyncState
 from .base import DeskCase
 
 
@@ -36,7 +36,9 @@ class WBSalesTests(DeskCase):
         self.assertEqual(SaleEvent.objects.get(external_id='S1').sku, '123')
         self.assertEqual(SaleEvent.objects.get(external_id='S1').source_data['forPay'], 0)
         state = SalesSyncState.objects.get(account=self.account)
-        self.assertIsNone(state.coverage_since)
+        self.assertIsNotNone(state.coverage_since)
+        self.assertEqual(state.coverage_until, source_time(returned['lastChangeDate']) - timedelta(microseconds=1))
+        self.assertIsNone(state.last_sync)  # Prefix confirmed; the full current scan is still running.
         self.assertEqual(state.cursor['page_from'], returned['lastChangeDate'])
         self.due(); request.return_value = []
         sync_wb_sales(self.account)
@@ -81,13 +83,37 @@ class WBSalesTests(DeskCase):
         self.assertGreater(SalesSyncState.objects.get().coverage_until, source_time(row['date']))
 
     @patch.object(WBSales, 'request')
-    def test_only_recent_event_dates_are_stored_and_raw_payload_is_kept(self, request):
+    def test_recent_changes_to_older_events_are_retained_and_future_event_dates_are_excluded(self, request):
         request.return_value = [self.row(1, date=(timezone.now() - timedelta(days=8)).isoformat()),
                                 self.row(2, date=(timezone.now() + timedelta(days=1)).isoformat()),
                                 self.row(3)]
         sync_wb_sales(self.account)
-        self.assertEqual(list(SaleEvent.objects.values_list('external_id', flat=True)), ['S3'])
-        self.assertEqual(SaleEvent.objects.get().source_data['supplierArticle'], 'not-the-card-id')
+        self.assertEqual(list(SaleEvent.objects.values_list('external_id', flat=True)), ['S1', 'S3'])
+        self.assertEqual(SaleEvent.objects.get(external_id='S3').source_data['supplierArticle'], 'not-the-card-id')
+
+    @patch.object(WBSales, 'request', return_value=[])
+    def test_incremental_refresh_overlaps_six_hours_and_preserves_long_term_coverage(self, request):
+        now = timezone.now()
+        beginning = now - timedelta(days=90)
+        prior = now - timedelta(minutes=30)
+        SalesSyncState.objects.create(account=self.account, coverage_since=beginning, coverage_until=prior)
+        sync_wb_sales(self.account)
+        self.assertEqual(source_time(request.call_args.kwargs['params']['dateFrom']), prior - timedelta(hours=6))
+        state = SalesSyncState.objects.get()
+        self.assertEqual(state.coverage_since, beginning)
+        self.assertGreater(state.coverage_until, prior)
+        audit = Audit.objects.get(action='sales.coverage')
+        self.assertEqual(source_time(audit.after['since']), prior - timedelta(hours=6))
+
+    @patch.object(WBSales, 'request')
+    def test_confirmed_prefix_excludes_the_unread_boundary_timestamp(self, request):
+        stamp = timezone.now() - timedelta(minutes=30)
+        request.return_value = [self.row(1, lastChangeDate=stamp.isoformat()), self.row(2, lastChangeDate=stamp.isoformat())]
+        sync_wb_sales(self.account)
+        state = SalesSyncState.objects.get()
+        self.assertEqual(state.coverage_until, stamp - timedelta(microseconds=1))
+        self.assertTrue(state.cursor)
+        self.assertEqual(Audit.objects.filter(action='sales.coverage').count(), 1)
 
     @patch.object(WBSales, 'request')
     def test_bad_row_never_marks_period_complete_or_partially_commits_page(self, request):

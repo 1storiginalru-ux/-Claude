@@ -81,3 +81,4 @@ jobs:
           desk.tests.test_reply_rollout
           desk.tests.test_control_analysis
           desk.tests.test_control_defaults
+          desk.tests.test_automatic_backfill

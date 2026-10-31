@@ -136,9 +136,14 @@ def review_summary(product, window='100', now=None, scope=None, account_id=None,
                         and (period['target'] is None or period['redemptions'] >= period['target'])
                         and classified == total)
     complete = period['complete'] and reviews_complete
+    snapshot_complete = period['coverage_complete'] and reviews_complete
+    enough = bool(period['start_at'] and period['redemptions'] and
+                  (period['target'] is None or period['redemptions'] >= period['target']))
     return {'period': period, 'total': total, 'classified': classified, 'unclassified': total - classified,
             'preliminary': preliminary, 'negative': negative,
             'review_rate': round(negative / total * 100, 2) if reviews_complete and total else None,
             'classified_rate': round(negative / classified * 100, 2) if classified else None,
             'per100': round(negative / period['redemptions'] * 100, 2) if complete and period['redemptions'] else None,
+            'snapshot_per100': round(negative / period['redemptions'] * 100, 2) if snapshot_complete and period['redemptions'] else None,
+            'known_per100': round(negative / period['redemptions'] * 100, 2) if enough and negative else None,
             'complete': complete}

@@ -12,6 +12,7 @@ from .coverage import record_coverage
 from .rate_limit import acquire, observe
 from .wb_sales import source_time, store_sales
 from .yandex import YandexMarket
+from .window import sales_window_start
 
 VERSION = 1
 FINAL = {'DELIVERED', 'PARTIALLY_RETURNED', 'RETURNED'}
@@ -237,7 +238,7 @@ def sync_ym_sales(account):
         cursor=state.cursor if isinstance(state.cursor,dict) else {}
         since,until=source_time(cursor.get('since')),source_time(cursor.get('until'))
         if cursor.get('ym_version')!=VERSION or not since or not until or not now-timedelta(days=8)<=since<until<=now:
-            cursor={'ym_version':VERSION,'since':(now-timedelta(days=7)).isoformat(),'until':now.isoformat()}
+            cursor={'ym_version':VERSION,'since':sales_window_start(state, now).isoformat(),'until':now.isoformat()}
         count,next_cursor,complete=load_page(account,state,cursor)
         if complete:
             record_coverage(state,source_time(cursor['since']),source_time(cursor['until']))

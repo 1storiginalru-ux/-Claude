@@ -15,9 +15,14 @@ class Command(BaseCommand):
         def stop(signum, frame): raise KeyboardInterrupt
         previous = signal.signal(signal.SIGTERM, stop)
         count = 0
+        next_scan = 0
         try:
             while True:
-                try: handled = process_one()
+                try:
+                    if not options['once'] and time.monotonic() >= next_scan:
+                        from desk.ai.backfill import refill
+                        refill(); next_scan = time.monotonic() + 30
+                    handled = process_one()
                 except OperationalError as error:
                     if not is_database_busy(error): raise
                     handled = False

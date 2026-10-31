@@ -11,7 +11,7 @@ from desk.products.identifiers import wb_nm_id
 from .base import Adapter, IntegrationError
 from .coverage import record_coverage
 from .rate_limit import acquire, observe
-from .window import LOOKBACK_DAYS, sync_window
+from .window import LOOKBACK_DAYS, sync_window, sales_window_start
 
 
 def source_time(value):
@@ -39,7 +39,7 @@ class WBSales(Adapter):
         return observe(token, response, namespace='wb-sales', fallback=7200, maximum=86400)
 
 
-def sales_page(rows, since, until, changed_since):
+def sales_page(rows, since, until, changed_since, *, retain_older=False):
     if not isinstance(rows, list) or len(rows) > 80000:
         raise IntegrationError('Неожиданный формат отчёта продаж WB.')
     events, changes = {}, []
@@ -51,7 +51,7 @@ def sales_page(rows, since, until, changed_since):
             raise IntegrationError('В строке продаж WB отсутствуют достоверные saleID, nmId или даты. Период не отмечен полным.')
         changes.append(changed)
         if changed > until: raise IntegrationError('WB вернул будущую дату изменения продажи. Полнота периода не подтверждена.')
-        if not since <= occurred <= until or changed < changed_since: continue
+        if occurred > until or (occurred < since and not retain_older) or changed < changed_since: continue
         order_id = str(row.get('srid') or '')
         if len(order_id) > 160: raise IntegrationError('WB вернул слишком длинный ID заказа.')
         events[identifier] = SaleEvent(external_id=identifier, sku=sku, kind='sale' if identifier[0] == 'S' else 'return',
@@ -59,6 +59,13 @@ def sales_page(rows, since, until, changed_since):
     if changes and (changes[-1] != max(changes) or changes[-1] <= changed_since):
         raise IntegrationError('Страница продаж WB не продвигает lastChangeDate. Требуется проверка; полнота периода не подтверждена.')
     return events
+
+
+def page_frontier(rows, since):
+    """WB advances by lastChangeDate. The boundary timestamp itself may have ties."""
+    if not rows: return None
+    frontier = source_time(rows[-1]['lastChangeDate']) - timedelta(microseconds=1)
+    return frontier if frontier > since else None
 
 
 @transaction.atomic
@@ -94,8 +101,9 @@ def sync_wb_sales(account):
     page_from = source_time(cursor.get('page_from'))
     if (cursor.get('lookback_days') != LOOKBACK_DAYS or not until or not lower <= until <= upper
             or not since or not page_from or page_from < lower):
-        cursor = {'lookback_days': LOOKBACK_DAYS, 'since': lower.isoformat(), 'until': upper.isoformat(), 'page_from': lower.isoformat()}
-        until, since, page_from = upper, lower, lower
+        begin = sales_window_start(state, now)
+        cursor = {'lookback_days': LOOKBACK_DAYS, 'since': begin.isoformat(), 'until': upper.isoformat(), 'page_from': begin.isoformat()}
+        until, since, page_from = upper, begin, begin
     try:
         rows = WBSales(account).request('GET', '/api/v1/supplier/sales', params={'dateFrom': cursor['page_from'], 'flag': 0})
         if not isinstance(rows, list) or len(rows) > 80000:
@@ -105,7 +113,7 @@ def sync_wb_sales(account):
             SalesSyncState.objects.filter(pk=state.pk, lease_token=lease).update(cursor={}, last_sync=now, next_attempt=now + timedelta(minutes=30), status='Продажи WB: период загружен полностью. Оперативный отчёт, не финансовая сверка.')
             return 0
         observed_until = timezone.now()
-        events = sales_page(rows, max(lower, since), observed_until, page_from)
+        events = sales_page(rows, max(lower, since), observed_until, page_from, retain_older=True)
         cursor['page_from'] = rows[-1]['lastChangeDate']
         cursor['until'] = observed_until.isoformat()
         with transaction.atomic():
@@ -113,6 +121,8 @@ def sync_wb_sales(account):
             if not SalesSyncState.objects.select_for_update().filter(pk=state.pk, lease_token=lease).first():
                 raise IntegrationError('Загрузка продаж передана другому процессу.')
             store_sales(account, events)
+            frontier = page_frontier(rows, max(lower, since))
+            if frontier: record_coverage(state, max(lower, since), frontier)
             SalesSyncState.objects.filter(pk=state.pk, lease_token=lease).update(cursor=cursor, next_attempt=now + timedelta(seconds=61), status=f'Обработано событий: {len(events)}. Продолжается загрузка; полнота периода ещё не подтверждена.')
         return len(events)
     except IntegrationError as error:

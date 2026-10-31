@@ -129,6 +129,34 @@ class ProductMetricTests(DeskCase):
         self.assertEqual(summary['per100'], 0)
         self.assertIsNone(summary['review_rate'])
 
+    def test_old_verified_snapshot_is_distinct_from_missing_coverage(self):
+        self.sales_events(160)
+        for i, event in enumerate(SaleEvent.objects.order_by('pk')):
+            event.occurred_at = self.now - timedelta(hours=i + 1); event.save(update_fields=['occurred_at'])
+        self.thread.received_at = self.now - timedelta(hours=5); self.thread.save()
+        self.analysis()
+        cutoff = self.now - timedelta(hours=4)
+        SalesSyncState.objects.update(coverage_until=cutoff)
+        summary = review_summary(self.product, now=self.now)
+        self.assertTrue(summary['period']['coverage_complete'])
+        self.assertFalse(summary['period']['complete'])
+        self.assertEqual(summary['snapshot_per100'], 1)
+        self.assertIsNone(summary['per100'])
+        self.assertTrue(summary['period']['freshness_reasons'])
+        self.assertNotIn('Не подтверждена полнота продаж API за окно', summary['period']['reasons'])
+        self.baseline(signal='NEGATIVE', low=0, high=1, min_redemptions=100, min_signals=1)
+        self.assertEqual(evaluate(self.product, 'NEGATIVE', now=self.now)['status'], 'WATCH')
+
+    def test_partial_classification_can_show_known_rate_but_never_a_final_rate(self):
+        self.sales_events()
+        self.analysis()
+        self.make_thread('not-reviewed')
+        summary = review_summary(self.product, now=self.now)
+        self.assertEqual(summary['known_per100'], 1)
+        self.assertIsNone(summary['snapshot_per100']); self.assertIsNone(summary['per100'])
+        self.client.force_login(self.user)
+        self.assertContains(self.client.get('/voc/'), 'Предварительно · по загруженным данным')
+
     def test_seven_day_review_percentage_does_not_require_sales(self):
         self.reviews()
         summary = review_summary(self.product, window='7d', now=self.now)

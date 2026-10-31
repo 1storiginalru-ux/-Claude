@@ -3,7 +3,7 @@ import json
 import uuid
 from datetime import datetime, time, timedelta
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Sum, Case, When, Value, IntegerField
 from django.utils import timezone
 from desk.models import AIJob, AIRequest, Analysis, Audit, Company, Thread
 from desk.voc.rules import human_only, MIN_CLASSIFICATION_CONFIDENCE
@@ -41,12 +41,13 @@ class TokenLimit(AIProblem): pass
 
 
 @transaction.atomic
-def enqueue(thread, actor=None, *, force=False, retry_failed=False, draft_only=False, classification_only=False):
+def enqueue(thread, actor=None, *, force=False, retry_failed=False, draft_only=False, classification_only=False, backfill=False):
     thread = Thread.objects.select_for_update(of=('self',), no_key=True).select_related('account__company', 'product').get(pk=thread.pk)
     company = thread.account.company
     if company.is_demo or not thread.account.enabled:
         raise AIProblem('AI доступен только для подключённого реального кабинета.')
     source, config, snapshot = prepare_classification(thread) if classification_only else prepare(thread)
+    if backfill: snapshot['backfill'] = True
     validate_settings(snapshot)
     active = list(AIJob.objects.filter(thread=thread, status__in=['queued', 'retry', 'blocked', 'running']))
     obsolete = [j.pk for j in active if j.source_fingerprint != source or
@@ -58,19 +59,22 @@ def enqueue(thread, actor=None, *, force=False, retry_failed=False, draft_only=F
     compatible = AIJob.objects.filter(thread=thread, source_fingerprint=source,
         snapshot__classification_config=snapshot['classification_config']).exclude(pk__in=obsolete).order_by('-pk')
     cached = {}
-    analysis_current = Analysis.objects.filter(thread=thread, source_fingerprint=source,
-                                              provider=snapshot['provider'], model=snapshot['model']).exists()
+    current_analysis = Analysis.objects.filter(thread=thread, source_fingerprint=source,
+                                              provider=snapshot['provider'], model=snapshot['model']).only('confidence').first()
+    analysis_current = current_analysis is not None
+    def checkpoint_matches(job):
+        return analysis_current and (not job.classification or current_analysis.confidence == job.classification.get('confidence'))
     if classification_only:
         full = compatible.filter(snapshot__classification_only__isnull=True, status__in=['queued', 'retry', 'blocked', 'running', 'done']).first()
         if full and not force:
-            if full.status != 'done' or analysis_current: return full
+            if full.status != 'done' or checkpoint_matches(full): return full
             cached = full.classification
     elif not force or draft_only:
         dependency = compatible.filter(snapshot__classification_only=True, status__in=['queued', 'retry', 'blocked', 'running', 'done']).first()
         if dependency: snapshot['classification_job'] = dependency.pk
     job, created = AIJob.objects.get_or_create(thread=thread, source_fingerprint=source, config_fingerprint=config,
                                               defaults={'actor': actor, 'snapshot': snapshot, 'classification': cached})
-    restore_cached = classification_only and job.status == 'done' and not analysis_current and bool(job.classification)
+    restore_cached = classification_only and job.status == 'done' and not checkpoint_matches(job) and bool(job.classification)
     if not created and (retry_failed and job.status in {'failed', 'cancelled', 'blocked'} or force and job.status == 'done' or restore_cached):
         job.status, job.error, job.attempts = 'queued', '', 0
         job.next_attempt, job.lease_token, job.lease_until = timezone.now(), None, None
@@ -166,7 +170,9 @@ def process_one():
     expired = AIJob.objects.filter(status='running', lease_until__lte=now)
     expired.filter(attempts__gte=MAX_ATTEMPTS).update(status='failed', error='Worker прерывался несколько раз. Повторите вручную.', lease_token=None, lease_until=None)
     expired.update(status='retry', next_attempt=now, lease_token=None, lease_until=None, error='Worker прерван; задача будет продолжена.')
-    candidate = AIJob.objects.filter(status__in=['queued', 'retry', 'blocked'], next_attempt__lte=now).order_by('next_attempt', 'pk').first()
+    candidate = AIJob.objects.filter(status__in=['queued', 'retry', 'blocked'], next_attempt__lte=now).annotate(
+        background_order=Case(When(snapshot__backfill=True, then=Value(1)), default=Value(0), output_field=IntegerField())
+    ).order_by('background_order', 'next_attempt', 'pk').first()
     if not candidate: return False
     token = uuid.uuid4()
     if not AIJob.objects.filter(pk=candidate.pk, status__in=['queued', 'retry', 'blocked'], next_attempt__lte=now).update(
@@ -212,7 +218,7 @@ def process_one():
                     status='done', error='', lease_until=None, lease_token=None)
             from desk.incidents.service import evaluate_incidents
             fresh = Thread.objects.select_related('analysis', 'assessment', 'account', 'product').get(pk=thread.pk)
-            evaluate_incidents(fresh, actor=job.actor)
+            evaluate_incidents(fresh, actor=job.actor, historical=bool(job.snapshot.get('backfill')))
             return True
         # Human Only governs decisions/publication, not assistance with wording.
         # Low confidence remains visible and never becomes a confirmed verdict.

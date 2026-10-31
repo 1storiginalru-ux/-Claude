@@ -12,7 +12,7 @@ from desk.ai.classification import RULES_VERSION, local_classify, review_section
 from .base import IntegrationError, get_adapter
 from .coverage import record_coverage
 from .sync import ingest
-from .wb_sales import WBSales, sales_page, source_time, store_sales
+from .wb_sales import WBSales, sales_page, source_time, store_sales, page_frontier
 
 STEPS = (7, 14, 30, 60, 90)
 MAX_DAYS = 90
@@ -82,6 +82,7 @@ def history_turn(account, kind, now=None):
     if kind == 'reviews' and Outgoing.objects.filter(thread__account=account, status__in=['Queued','Sending','Sent']).exists(): return False
     model = SalesSyncState if kind == 'sales' else SyncState
     current = model.objects.filter(account=account).first()
+    if kind == 'sales' and current and current.cursor: return False
     return bool(current and current.coverage_until)
 
 
@@ -116,6 +117,8 @@ def historical_analysis(thread, changed):
     old = Analysis.objects.filter(thread=thread).first()
     if old and not changed: return
     if old and old.provider not in {'rules','demo'}:
+        from desk.ai.context import source_digest
+        if old.source_fingerprint and old.source_fingerprint == source_digest(thread): return
         # Preserve model output, but do not count a verdict for an edited review as verified.
         before={'confidence':old.confidence,'summary':old.summary}
         Analysis.objects.filter(pk=old.pk).update(confidence=0, summary=old.summary[:1800]+' Текст изменился; требуется повторная проверка.')
@@ -233,6 +236,8 @@ def sales_history_page(account,state,cursor):
         if not HistorySyncState.objects.select_for_update().filter(pk=state.pk,lease_token=state.lease_token).exists():
             raise IntegrationError('Историческая загрузка передана другому процессу.')
         count=store_sales(account,events)
+        frontier = page_frontier(rows, max(since, observed-timedelta(days=MAX_DAYS)))
+        if frontier: merge_current_coverage(account, 'sales', max(since, observed-timedelta(days=MAX_DAYS)), frontier)
         cursor.update(page_from=rows[-1]['lastChangeDate'])
         HistorySyncState.objects.filter(pk=state.pk,lease_token=state.lease_token).update(cursor=cursor,next_attempt=observed+timedelta(seconds=61),status=f'История продаж {cursor["days"]} дней: загружено ещё {count}; обход продолжается.')
     return count

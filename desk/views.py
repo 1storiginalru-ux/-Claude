@@ -395,7 +395,7 @@ def tone(request):
 
 @login_required
 def ai_queue(request):
-    from .models import AIJob, AIRequest
+    from .models import AIJob, AIRequest, AIBackfillState
     scope = companies_for(request.user)
     jobs = AIJob.objects.filter(Q(thread__account__company__in=scope)|Q(test_case__account__company__in=scope)).select_related('thread__account__company', 'thread__product','test_case__account__company').order_by('-updated_at', '-pk')
     if request.GET.get('status') in dict(AIJob.STATUSES): jobs = jobs.filter(status=request.GET['status'])
@@ -403,7 +403,8 @@ def ai_queue(request):
     spent = AIRequest.objects.filter(company__in=scope, month=timezone.localdate().replace(day=1)).values('company_id').annotate(tokens=Sum('budget_tokens'), input=Sum('input_tokens'), output=Sum('output_tokens'))
     totals = {row['company_id']: row for row in spent}
     settings = [{'company': c, 'usage': totals.get(c.pk, {})} for c in scope]
-    return render(request, 'desk/ai_queue.html', context(request, ai_jobs=page, ai_settings=settings, ai_statuses=AIJob.STATUSES))
+    backfill = AIBackfillState.objects.filter(account__company__in=scope).select_related('account')
+    return render(request, 'desk/ai_queue.html', context(request, ai_jobs=page, ai_settings=settings, ai_statuses=AIJob.STATUSES, backfill_states=backfill))
 
 
 @login_required

@@ -169,6 +169,14 @@ class MarketSalesPollingTests(MarketSalesCase):
         state=SalesSyncState.objects.get();self.assertFalse(state.cursor)
         self.assertEqual(state.coverage_until,self.now);self.assertIsNone(state.lease_token)
 
+    @patch.object(YandexSales,'request',return_value={'orders':[]})
+    def test_incremental_market_poll_uses_six_hour_overlap_without_losing_completed_history(self,request):
+        self.coverage(90)
+        sync_ym_sales(self.ym)
+        dates=request.call_args.kwargs['json']['dates']
+        self.assertEqual(timezone.datetime.fromisoformat(dates['updateDateFrom']),self.now-timedelta(hours=6))
+        self.assertEqual(SalesSyncState.objects.get().coverage_since,self.now-timedelta(days=90))
+
     @patch.object(YandexSales,'request')
     def test_next_page_and_429_resume_same_snapshot(self,request):
         request.side_effect=self.responses([self.order()],[self.stats()],token='next')

@@ -46,6 +46,9 @@ class Command(BaseCommand):
                     from desk.models import Outgoing
                     for account in history_accounts:
                         for kind in ['sales', 'reviews']:
+                            if kind == 'sales':
+                                from desk.models import SalesSyncState
+                                if SalesSyncState.objects.filter(account=account).exclude(cursor={}).exists(): continue
                             if kind == 'reviews' and Outgoing.objects.filter(thread__account=account,status__in=['Queued','Sending','Sent']).exists(): continue
                             try:
                                 count = sync_history(account, kind)

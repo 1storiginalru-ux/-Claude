@@ -77,12 +77,15 @@ def calculate_window(window, now, api_accounts, all_accounts, manual_accounts, s
     manual_present = {row['account_id'] for row in daily}
     if manual_accounts - manual_present:
         reasons.append('Не для всех кабинетов загружены продажи')
+    freshness_reasons = []
     for account_id in api_accounts:
         state = sales_states.get(account_id)
         if (not state or not state.coverage_since or not state.coverage_until
-                or not start_at or state.coverage_since > start_at or state.coverage_until < now - timedelta(hours=3)):
+                or not start_at or state.coverage_since > start_at or (exact and state.coverage_until < until)):
             reasons.append('Не подтверждена полнота продаж API за окно')
             break
+    if any(s.coverage_until and s.coverage_until < now - timedelta(hours=3) for s in sales_states.values()):
+        freshness_reasons.append('Последнее подтверждение продаж старше трёх часов; обновление продолжается')
     from .uncertainty import overlaps
     ambiguous=any(overlaps(issue,start_at,until) for issue in uncertainties if issue['account_id'] in api_accounts)
     if ambiguous:
@@ -92,12 +95,17 @@ def calculate_window(window, now, api_accounts, all_accounts, manual_accounts, s
     for account_id in all_accounts:
         state = feedback_states.get(account_id)
         if (not state or not state.coverage_since or not state.coverage_until or not start_at
-                or state.coverage_since > start_at or state.coverage_until < now - timedelta(hours=3)):
+                or state.coverage_since > start_at or (exact and state.coverage_until < until)):
             feedback_reasons.append('Не подтверждена полнота отзывов за окно')
             break
+    if any(s.coverage_until and s.coverage_until < now - timedelta(hours=3) for s in feedback_states.values()):
+        freshness_reasons.append('Последнее подтверждение отзывов старше трёх часов; обновление продолжается')
     reasons.extend(feedback_reasons)
+    coverage_complete = bool(all_accounts) and not reasons
+    reasons.extend(freshness_reasons)
     span_days = max(1, math.ceil((until-start_at).total_seconds()/86400)) if start_at else None
     return {'redemptions': total, 'start': start_day, 'start_at': start_at, 'until': until, 'span_days': span_days, 'exact': exact,
             'target': target, 'reasons': list(dict.fromkeys(reasons)), 'complete': bool(all_accounts) and not reasons,
             'has_api': bool(api_accounts), 'accounts': all_accounts,
-            'sales_reasons': sales_reasons, 'feedback_reasons': feedback_reasons,'window_ambiguous':ambiguous}
+            'sales_reasons': sales_reasons, 'feedback_reasons': feedback_reasons,'window_ambiguous':ambiguous,
+            'coverage_complete': coverage_complete, 'freshness_reasons': freshness_reasons}

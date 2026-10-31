@@ -58,10 +58,13 @@ def escalate(thread, signal, actor=None, metric=None, *, trigger=None):
     return incident
 
 
-def evaluate_incidents(thread, actor=None):
+def evaluate_incidents(thread, actor=None, *, historical=False):
     if not thread.product_id: return
     analysis = effective_analysis(thread)
     if not analysis: return
+    from datetime import timedelta
+    from django.utils import timezone
+    recent = not historical or thread.received_at >= timezone.now() - timedelta(days=7)
     signals = grouped_signals(analysis.signals)
     if is_negative(analysis): signals.append('NEGATIVE')
     for signal in signals:
@@ -71,9 +74,9 @@ def evaluate_incidents(thread, actor=None):
             if scoped['status'] == 'ANOMALY': stats = scoped
         if stats['status'] == 'ANOMALY':
             attach_metric_incident(thread.product, stats, actor)
-        elif signal != 'NEGATIVE' and trusted_analysis(analysis) and analysis.objective_issue and analysis.severity in {'P0', 'P1'}:
+        elif recent and signal != 'NEGATIVE' and trusted_analysis(analysis) and analysis.objective_issue and analysis.severity in {'P0', 'P1'}:
             escalate(thread, signal, actor, stats, trigger='serious')
-        elif is_negative(analysis) and trusted_analysis(analysis):
+        elif is_negative(analysis) and trusted_analysis(analysis) and (not historical or any(t.pk == thread.pk for t in stats['selected'])):
             canonical = product_family(thread.product).order_by('pk').first()
             if Incident.objects.filter(product=canonical, signal=signal).exclude(status='CLOSED').exists():
                 escalate(thread, signal, actor, stats)

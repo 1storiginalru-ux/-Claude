@@ -10,6 +10,12 @@ def record_coverage(state, since, until):
         return
     current = type(state).objects.select_for_update().get(pk=state.pk)
     if current.lease_token != state.lease_token: return
+    from desk.models import SalesSyncState, Audit
+    if isinstance(current, SalesSyncState):
+        Audit.objects.create(company_id=current.account.company_id, action='sales.coverage', object_id=str(current.account_id),
+            before={'since': current.coverage_since.isoformat() if current.coverage_since else None,
+                    'until': current.coverage_until.isoformat() if current.coverage_until else None},
+            after={'since': since.isoformat(), 'until': until.isoformat(), 'basis': 'completed_api_interval'})
     previous_since, previous_until = current.coverage_since, current.coverage_until
     if previous_since and previous_until:
         if until < previous_since:
