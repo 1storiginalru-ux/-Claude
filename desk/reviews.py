@@ -28,6 +28,12 @@ def effective_analysis(thread):
             provider='human', confidence=1, requires_human=True,
         )
     analysis = getattr(thread, 'analysis', None)
+    if analysis and isinstance(analysis.evidence, dict):
+        review = analysis.evidence.get('chat_review')
+        if isinstance(review, dict) and review.get('feedback_fingerprint'):
+            from desk.ai.context import digest
+            from desk.ai.classification import review_feedback
+            if review['feedback_fingerprint'] != digest(review_feedback(thread)): return None
     if analysis and analysis.provider == 'rating':
         from desk.ai.ratings import rating_result
         if rating_result(thread) is None: return None

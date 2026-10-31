@@ -19,6 +19,58 @@ from .test_ai_queue import AIConfiguredCase, POSITIVE
 
 
 class RatingAnalysisTests(AIConfiguredCase):
+    def test_reviewed_analysis_is_stale_after_selected_feedback_changes(self):
+        from desk.ai.classification import review_feedback
+        from desk.ai.context import digest
+        self.thread.source_data = {'bables': ['плохое качество']}; self.thread.save()
+        self.analysis(self.thread, provider='AI-разбор в чате', confidence=.95,
+            source_fingerprint=source_digest(self.thread),
+            evidence={'chat_review': {'feedback_fingerprint': digest(review_feedback(self.thread))}})
+        thread = type(self.thread).objects.select_related('account', 'analysis').get(pk=self.thread.pk)
+        self.assertIsNotNone(effective_analysis(thread))
+        old = source_digest(thread)
+        thread.source_data['bables'] = ['плохо пахнет']
+        self.assertEqual(source_digest(thread), old)
+        self.assertIsNone(effective_analysis(thread))
+
+    @patch('desk.ai.queue.complete')
+    def test_known_positive_wb_tags_are_free_and_not_complaint_topics(self, post):
+        thread = self.blank(source_data={'bables': ['качество', 'хороший эффект', 'хорошо пахнет']})
+        job = enqueue(thread, classification_only=True); process_one(); job.refresh_from_db()
+        result = Analysis.objects.get(thread=thread)
+        self.assertEqual(job.status, 'done'); self.assertEqual(result.sentiment, 'positive')
+        self.assertEqual(result.signals, []); self.assertFalse(result.hidden_negative or result.objective_issue)
+        self.assertEqual(result.evidence['classification_basis']['kind'], 'rating_and_tags')
+        self.assertEqual(result.provider_label, 'По оценке и тегам, без AI')
+        post.assert_not_called(); self.assertFalse(AIRequest.objects.exists())
+
+    def test_negative_wb_tag_with_high_rating_is_hidden_negative_without_proven_defect(self):
+        thread = self.blank(source_data={'bables': ['плохо пахнет']})
+        result = classify_rating(thread)
+        self.assertEqual(result.signals, ['SCENT']); self.assertTrue(result.hidden_negative)
+        self.assertEqual(result.sentiment, 'negative'); self.assertFalse(result.objective_issue)
+
+    def test_generic_quality_or_effect_tag_does_not_invent_authenticity_or_longevity(self):
+        for tags in [['плохое качество'], ['нет эффекта'], ['нет эффекта', 'плохое качество']]:
+            with self.subTest(tags=tags):
+                data = rating_result(self.blank(rating=2, source_data={'bables': tags}))
+                self.assertEqual(data['signals'], ['OTHER']); self.assertFalse(data['objective_issue'])
+
+    def test_unknown_malformed_or_mixed_tags_require_other_classification(self):
+        for tags in [['качество', 'неизвестный тег'], 'хорошо пахнет', [None], ['']]:
+            with self.subTest(tags=tags):
+                self.assertIsNone(rating_result(self.blank(source_data={'bables': tags})))
+
+    def test_editing_only_a_selected_tag_invalidates_old_result_and_changes_fingerprint(self):
+        thread = self.blank(source_data={'bables': ['хорошо пахнет']})
+        first = source_digest(thread); classify_rating(thread)
+        thread = type(thread).objects.select_related('account', 'analysis').get(pk=thread.pk)
+        thread.source_data['bables'] = ['плохо пахнет']
+        self.assertNotEqual(source_digest(thread), first)
+        self.assertIsNone(effective_analysis(thread))
+        thread.save(); result = classify_rating(thread)
+        self.assertEqual(result.signals, ['SCENT']); self.assertTrue(result.hidden_negative)
+
     def blank(self, **kwargs):
         self.thread.kind = 'review'
         self.thread.account = self.account

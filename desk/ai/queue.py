@@ -8,7 +8,7 @@ from django.utils import timezone
 from desk.models import AIJob, AIRequest, Analysis, Audit, Company, Thread
 from desk.voc.rules import human_only, MIN_CLASSIFICATION_CONFIDENCE
 from .classification import local_classify
-from .ratings import rating_result, VERSION as RATING_VERSION
+from .ratings import rating_result, rating_basis, VERSION as RATING_VERSION
 from .context import PIPELINE_VERSION, prepare, prepare_classification
 from .client import ProviderProblem, complete, validate_settings
 from .provider import AIProblem, SignalProblem, validate_result
@@ -36,6 +36,10 @@ CLASSIFIER = (
     'objective_issue indicates a concrete issue needing investigation, not proof of a defect. '
     'Use the exact signal codes from the list: longevity complaints are LONG, packaging is PACK, '
     'description mismatch is CONTENT. Never invent category codes or return sentiment as a signal. '
+    'LONG means insufficient duration: "запах не держится", "быстро выветривается" even with typos. '
+    'SCENT means an unpleasant, different or weak-smelling scent, not duration alone. '
+    'Praise for packaging or delivery is not PACK or DELIVERY. Subjective scent or longevity '
+    'complaints alone are not objective_issue; broken glass, leaks or missing parts are concrete issues to check. '
     'Do not write a customer reply.'
 )
 
@@ -193,7 +197,7 @@ def save_result(job, data, *, used_fact_ids=(), operator_notes=(), routing=None,
     rating = rating_result(thread)
     is_rating = rating is not None and all(data.get(key) == value for key, value in rating.items() if key not in {'draft', 'requires_human'})
     if is_rating:
-        evidence['classification_basis'] = {'kind': 'rating_only', 'rating': thread.rating, 'version': RATING_VERSION}
+        evidence['classification_basis'] = rating_basis(thread)
         if routing is not None: evidence['reply_provider'] = job.snapshot['provider']
     if job.snapshot.get('classification_only') and old and old['draft'] and old['source_fingerprint'] == job.source_fingerprint:
         # Keep the provenance/configuration of the reply as well as its text.

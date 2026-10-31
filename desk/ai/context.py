@@ -27,8 +27,10 @@ def source_context(thread):
     # richer raw content to a textless review must invalidate a rating checkpoint
     # even though its displayed placeholder did not change.
     from .ratings import rating_result, EMPTY_TEXT
-    if thread.kind == 'review' and thread.text.strip() in {'', EMPTY_TEXT} and rating_result(thread) is None:
-        source['rating_only_excluded'] = True
+    if thread.kind == 'review' and thread.text.strip() in {'', EMPTY_TEXT}:
+        if thread.account.platform == 'wb' and isinstance(thread.source_data, dict) and thread.source_data.get('bables'):
+            source['feedback_tags'] = thread.source_data['bables']
+        if rating_result(thread) is None: source['rating_only_excluded'] = True
     return source
 
 

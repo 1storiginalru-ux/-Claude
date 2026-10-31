@@ -9,6 +9,17 @@ RULES_VERSION = 'rules-2.0'
 PROMPT_VERSION = 'classification-2.0'
 
 
+def review_feedback(thread):
+    """Selected marketplace labels, without customer identity or credentials."""
+    raw = thread.source_data if isinstance(thread.source_data, dict) else {}
+    tags = raw.get('bables') if thread.account.platform == 'wb' else None
+    if isinstance(tags, list) and all(isinstance(t, str) for t in tags):
+        tags = sorted(t.strip().casefold().replace('ё', 'е') for t in tags)
+    stats = raw.get('statistics') if isinstance(raw.get('statistics'), dict) else {}
+    return {'tags': tags or [], 'matching_size': (raw.get('matchingSize') or '') if thread.account.platform == 'wb' else '',
+            'recommended': stats.get('recommended') if thread.account.platform == 'ym' else None}
+
+
 def review_sections(thread):
     """Use structured fields only when they describe this exact stored text."""
     if thread.kind != 'review' or not isinstance(thread.source_data, dict):

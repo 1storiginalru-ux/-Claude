@@ -270,6 +270,8 @@ class Analysis(models.Model):
 
     @property
     def provider_label(self):
+        if self.provider == 'rating' and (self.evidence or {}).get('classification_basis', {}).get('kind') == 'rating_and_tags':
+            return 'По оценке и тегам, без AI'
         return 'По оценке, без AI' if self.provider == 'rating' else self.provider
 
     @property

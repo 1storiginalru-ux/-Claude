@@ -66,7 +66,7 @@ class Command(BaseCommand):
             self.stdout.write(f'{account.name}: выборка за {months} мес., с {cutoff:%d.%m.%Y %H:%M} МСК по текущий момент.')
             self.stdout.write(f'{account.name}: всего {counts["total"]}, разобрано {counts["trusted"]}, '
                 f'для AI {counts["needs_ai"]}, низкая уверенность AI {counts["uncertain"]}, отложено сотрудником {counts["human_pending"]}. Авторазбор истории: {bool(state and state.enabled)}.')
-            if counts['rating']: self.stdout.write(f'  Из разобранных по оценке без AI: {counts["rating"]}. Причина оценки не определялась.')
+            if counts['rating']: self.stdout.write(f'  Из разобранных по оценке и известным тегам без AI: {counts["rating"]}. Свойства товара не проверялись.')
             if state: self.stdout.write(f'  {state.status} Следующий обход: {state.next_attempt.isoformat()}')
             jobs = AIJob.objects.filter(thread__account=account, thread__received_at__gte=cutoff, thread__received_at__lte=now)
             self.stdout.write('  Очередь: ' + str(list(jobs.values('status').annotate(count=Count('pk')).order_by('status'))))
