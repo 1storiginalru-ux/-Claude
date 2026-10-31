@@ -16,6 +16,14 @@ def assessment_is_current(thread):
     return bool(assessment and assessment.source_fingerprint == fingerprint(thread))
 
 
+def review_media_fingerprint(thread):
+    """Track the attachments used for a visual review, without fetching them."""
+    from desk.ai.context import digest
+    from desk.integrations.content import content_view
+    media = content_view(thread)
+    return digest({'photos': media['photos'], 'videos': media['videos']})
+
+
 def effective_analysis(thread):
     assessment = getattr(thread, 'assessment', None)
     if assessment:
@@ -30,10 +38,13 @@ def effective_analysis(thread):
     analysis = getattr(thread, 'analysis', None)
     if analysis and isinstance(analysis.evidence, dict):
         review = analysis.evidence.get('chat_review')
-        if isinstance(review, dict) and review.get('feedback_fingerprint'):
-            from desk.ai.context import digest
-            from desk.ai.classification import review_feedback
-            if review['feedback_fingerprint'] != digest(review_feedback(thread)): return None
+        if isinstance(review, dict):
+            if review.get('feedback_fingerprint'):
+                from desk.ai.context import digest
+                from desk.ai.classification import review_feedback
+                if review['feedback_fingerprint'] != digest(review_feedback(thread)): return None
+            if review.get('media_fingerprint') and review['media_fingerprint'] != review_media_fingerprint(thread):
+                return None
     if analysis and analysis.provider == 'rating':
         from desk.ai.ratings import rating_result
         if rating_result(thread) is None: return None

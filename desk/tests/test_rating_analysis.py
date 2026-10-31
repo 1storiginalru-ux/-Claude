@@ -19,6 +19,37 @@ from .test_ai_queue import AIConfiguredCase, POSITIVE
 
 
 class RatingAnalysisTests(AIConfiguredCase):
+    def test_visual_review_is_stale_when_attachments_change_without_text_changes(self):
+        from desk.reviews import review_media_fingerprint
+        self.thread.source_data = {'photoLinks': [{'fullSize': 'https://example.com/bottle.jpg'}]}
+        self.thread.save()
+        self.analysis(self.thread, provider='AI-разбор в чате', confidence=.95,
+            source_fingerprint=source_digest(self.thread),
+            evidence={'chat_review': {'media_fingerprint': review_media_fingerprint(self.thread)}})
+        thread = type(self.thread).objects.select_related('account', 'analysis').get(pk=self.thread.pk)
+        self.assertIsNotNone(effective_analysis(thread))
+        original = source_digest(thread)
+        for raw in [
+            {'photoLinks': [{'fullSize': 'https://example.com/broken.jpg'}]},
+            {},
+            {**thread.source_data, 'video': {'link': 'https://example.com/new.mp4'}},
+        ]:
+            with self.subTest(raw=raw):
+                thread.source_data = raw
+                self.assertEqual(source_digest(thread), original)
+                self.assertIsNone(effective_analysis(thread))
+
+    def test_visual_guard_does_not_invalidate_unmarked_results_or_override_staff(self):
+        self.analysis(self.thread, provider='AI-разбор в чате', confidence=.95,
+            source_fingerprint=source_digest(self.thread), evidence={'chat_review': {}})
+        thread = type(self.thread).objects.select_related('account', 'analysis').get(pk=self.thread.pk)
+        thread.source_data = {'photoLinks': [{'fullSize': 'https://example.com/new.jpg'}]}
+        self.assertIsNotNone(effective_analysis(thread))
+        thread.analysis.evidence = {'chat_review': {'media_fingerprint': 'stale'}}
+        self.assess()
+        thread.assessment = ReviewAssessment.objects.get(thread=thread)
+        self.assertEqual(effective_analysis(thread).provider, 'human')
+
     def test_reviewed_analysis_is_stale_after_selected_feedback_changes(self):
         from desk.ai.classification import review_feedback
         from desk.ai.context import digest
