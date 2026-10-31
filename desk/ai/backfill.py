@@ -9,6 +9,7 @@ from desk.voc.rules import trusted_analysis
 from .provider import AIProblem
 from .queue import enqueue
 from .backfill_period import period_start, cancel_outside_period
+from .ratings import rating_result, classify_rating
 
 SCAN_SIZE = 200
 QUEUE_LIMIT = 20
@@ -53,6 +54,10 @@ def refill():
                 scanned += 1
                 # Human decisions (also deferred/stale ones) are never overruled.
                 if not getattr(thread, 'assessment', None) and not trusted_analysis(effective_analysis(thread)):
+                    if rating_result(thread) is not None and classify_rating(thread) is not None:
+                        state.before_pk = thread.pk
+                        state.before_received_at = thread.received_at
+                        continue
                     try:
                         job = enqueue(thread, classification_only=True, backfill=True)
                     except AIProblem as error:

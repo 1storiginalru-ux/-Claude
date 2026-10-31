@@ -52,11 +52,13 @@ class Command(BaseCommand):
         for account in accounts:
             months = wanted[account.pk][1]
             cutoff = period_start(months, now)
-            counts = dict(total=0, trusted=0, human_pending=0, uncertain=0, needs_ai=0)
+            counts = dict(total=0, trusted=0, human_pending=0, uncertain=0, needs_ai=0, rating=0)
             for thread in Thread.objects.filter(account=account, kind='review', received_at__gte=cutoff, received_at__lte=now).select_related('analysis', 'assessment', 'account__company', 'product').iterator():
                 counts['total'] += 1
                 analysis = effective_analysis(thread)
-                if trusted_analysis(analysis): counts['trusted'] += 1
+                if trusted_analysis(analysis):
+                    counts['trusted'] += 1
+                    if analysis.provider == 'rating': counts['rating'] += 1
                 elif getattr(thread, 'assessment', None): counts['human_pending'] += 1
                 elif analysis and analysis.provider not in {'rules', 'demo'}: counts['uncertain'] += 1
                 else: counts['needs_ai'] += 1
@@ -64,6 +66,7 @@ class Command(BaseCommand):
             self.stdout.write(f'{account.name}: выборка за {months} мес., с {cutoff:%d.%m.%Y %H:%M} МСК по текущий момент.')
             self.stdout.write(f'{account.name}: всего {counts["total"]}, разобрано {counts["trusted"]}, '
                 f'для AI {counts["needs_ai"]}, низкая уверенность AI {counts["uncertain"]}, отложено сотрудником {counts["human_pending"]}. Авторазбор истории: {bool(state and state.enabled)}.')
+            if counts['rating']: self.stdout.write(f'  Из разобранных по оценке без AI: {counts["rating"]}. Причина оценки не определялась.')
             if state: self.stdout.write(f'  {state.status} Следующий обход: {state.next_attempt.isoformat()}')
             jobs = AIJob.objects.filter(thread__account=account, thread__received_at__gte=cutoff, thread__received_at__lte=now)
             self.stdout.write('  Очередь: ' + str(list(jobs.values('status').annotate(count=Count('pk')).order_by('status'))))

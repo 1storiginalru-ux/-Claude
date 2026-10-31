@@ -16,13 +16,20 @@ def digest(value):
 
 def source_context(thread):
     product = thread.product if thread.product_id else None
-    return {'text': thread.text, 'rating': thread.rating, 'kind': thread.kind,
+    source = {'text': thread.text, 'rating': thread.rating, 'kind': thread.kind,
             'platform': thread.account.platform, 'channel': thread.account.get_platform_display(),
             'is_public': thread.kind in {'review', 'question'},
             'review_sections': review_sections(thread), 'sku': thread.sku,
             'product': {'id': thread.product_id, 'code': product.code, 'name': product.name,
                         'brand': product.brand, 'volume': product.volume,
                         'concentration': product.concentration} if product else None}
+    # Preserve existing fingerprints for ordinary/rating-only reviews. Adding
+    # richer raw content to a textless review must invalidate a rating checkpoint
+    # even though its displayed placeholder did not change.
+    from .ratings import rating_result, EMPTY_TEXT
+    if thread.kind == 'review' and thread.text.strip() in {'', EMPTY_TEXT} and rating_result(thread) is None:
+        source['rating_only_excluded'] = True
+    return source
 
 
 def source_digest(thread): return digest(source_context(thread))

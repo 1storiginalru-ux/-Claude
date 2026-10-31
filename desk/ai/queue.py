@@ -3,11 +3,12 @@ import json
 import uuid
 from datetime import datetime, time, timedelta
 from django.db import transaction
-from django.db.models import Sum, Case, When, Value, IntegerField, DateTimeField, F
+from django.db.models import Sum, Case, When, Value, IntegerField, DateTimeField, F, Q
 from django.utils import timezone
 from desk.models import AIJob, AIRequest, Analysis, Audit, Company, Thread
 from desk.voc.rules import human_only, MIN_CLASSIFICATION_CONFIDENCE
 from .classification import local_classify
+from .ratings import rating_result, VERSION as RATING_VERSION
 from .context import PIPELINE_VERSION, prepare, prepare_classification
 from .client import ProviderProblem, complete, validate_settings
 from .provider import AIProblem, validate_result
@@ -64,11 +65,15 @@ def enqueue(thread, actor=None, *, force=False, retry_failed=False, draft_only=F
     compatible = AIJob.objects.filter(thread=thread, source_fingerprint=source,
         snapshot__classification_config=snapshot['classification_config']).exclude(pk__in=obsolete).order_by('-pk')
     cached = {}
-    current_analysis = Analysis.objects.filter(thread=thread, source_fingerprint=source,
-                                              provider=snapshot['provider'], model=snapshot['model']).only('confidence').first()
+    current_analysis = Analysis.objects.filter(thread=thread, source_fingerprint=source).filter(
+        Q(provider=snapshot['provider'], model=snapshot['model']) | Q(provider='rating')
+    ).only('confidence', 'provider').first()
+    if current_analysis and current_analysis.provider == 'rating' and rating_result(thread) is None:
+        current_analysis = None
     analysis_current = current_analysis is not None
     def checkpoint_matches(job):
-        return analysis_current and (not job.classification or current_analysis.confidence == job.classification.get('confidence'))
+        return analysis_current and (current_analysis.provider == 'rating' or not job.classification or
+                                     current_analysis.confidence == job.classification.get('confidence'))
     if classification_only:
         full = compatible.filter(snapshot__classification_only__isnull=True, status__in=['queued', 'retry', 'blocked', 'running', 'done']).first()
         if full and not force:
@@ -163,15 +168,28 @@ def save_result(job, data, *, used_fact_ids=(), operator_notes=(), routing=None,
     thread = current_thread(job)
     if restricted(thread, data) or data['confidence'] < MIN_CLASSIFICATION_CONFIDENCE:
         data = {**data, 'requires_human': True}
-    old = Analysis.objects.filter(thread=thread).values('provider', 'model', 'sentiment', 'signals', 'confidence', 'draft').first()
+    old = Analysis.objects.filter(thread=thread).values('provider', 'model', 'sentiment', 'signals', 'confidence', 'draft', 'evidence', 'source_fingerprint').first()
     evidence = {'job': job.pk, 'version': job.snapshot['version'], 'config': job.config_fingerprint,
                 'classification_only': bool(job.snapshot.get('classification_only')),
                 'facts': job.snapshot['facts'], 'used_fact_ids': list(used_fact_ids),
                 'operator_notes': review_notes(data, operator_notes), 'reply_plan': public_plan(routing) if routing else {}}
-    result, _ = Analysis.objects.update_or_create(thread=thread, defaults={**data, 'provider': job.snapshot['provider'],
-        'model': job.snapshot['model'], 'prompt_version': job.snapshot['version'], 'source_fingerprint': job.source_fingerprint, 'evidence': evidence})
+    rating = rating_result(thread)
+    is_rating = rating is not None and all(data.get(key) == value for key, value in rating.items() if key not in {'draft', 'requires_human'})
+    if is_rating:
+        evidence['classification_basis'] = {'kind': 'rating_only', 'rating': thread.rating, 'version': RATING_VERSION}
+        if routing is not None: evidence['reply_provider'] = job.snapshot['provider']
+    if job.snapshot.get('classification_only') and old and old['draft'] and old['source_fingerprint'] == job.source_fingerprint:
+        # Keep the provenance/configuration of the reply as well as its text.
+        evidence = {**(old['evidence'] or {}), 'classification': evidence,
+                    **({'classification_basis': evidence['classification_basis']} if is_rating else {})}
+    defaults = {**data, 'provider': 'rating' if is_rating else job.snapshot['provider'],
+        'model': '' if is_rating else job.snapshot['model'], 'prompt_version': RATING_VERSION if is_rating else job.snapshot['version'],
+        'source_fingerprint': job.source_fingerprint, 'evidence': evidence}
+    # Classification-only work must not erase any previously prepared reply.
+    if job.snapshot.get('classification_only'): defaults.pop('draft')
+    result, _ = Analysis.objects.update_or_create(thread=thread, defaults=defaults)
     Audit.objects.create(company=thread.account.company, actor=job.actor, action='analysis.create', object_id=str(thread.pk),
-                         before=old or {}, after={**data, 'provider': result.provider, 'model': result.model, 'evidence': evidence})
+                         before=old or {}, after={**data, 'draft': result.draft, 'provider': result.provider, 'model': result.model, 'evidence': evidence})
     if routing is not None: store_result(job,data,operator_notes,routing,method=method)
     return result
 
@@ -195,7 +213,13 @@ def process_one():
     try:
         thread = current_thread(job)
         if len(thread.text) > 16000: raise AIProblem('Отзыв слишком длинный для автоматического анализа; проверьте его вручную.')
-        data = job.classification
+        rating = rating_result(thread) if not job.test_case_id else None
+        data = rating or job.classification
+        if rating and job.classification != rating:
+            with transaction.atomic():
+                save_result(job, data)
+                AIJob.objects.filter(pk=job.pk, lease_token=token, status='running').update(classification=data)
+            job.classification = data
         dependency_id = job.snapshot.get('classification_job')
         if not data and dependency_id:
             dependency = AIJob.objects.get(pk=dependency_id)

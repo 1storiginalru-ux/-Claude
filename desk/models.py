@@ -269,6 +269,10 @@ class Analysis(models.Model):
     created_at = models.DateTimeField(auto_now=True)
 
     @property
+    def provider_label(self):
+        return 'По оценке, без AI' if self.provider == 'rating' else self.provider
+
+    @property
     def grouped_signals(self):
         from .voc.rules import grouped_signals, signal_label
         return [signal_label(signal) for signal in grouped_signals(self.signals)]

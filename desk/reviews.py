@@ -28,6 +28,9 @@ def effective_analysis(thread):
             provider='human', confidence=1, requires_human=True,
         )
     analysis = getattr(thread, 'analysis', None)
+    if analysis and analysis.provider == 'rating':
+        from desk.ai.ratings import rating_result
+        if rating_result(thread) is None: return None
     if analysis and analysis.source_fingerprint:
         from desk.ai.context import source_digest
         if analysis.source_fingerprint != source_digest(thread): return None
