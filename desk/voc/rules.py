@@ -62,7 +62,13 @@ def evaluate(product, signal, window='100', now=None, scope=None, account_id=Non
     count = len(selected)
     raw_rate = count / total * 100 if total else None
     rate = round(raw_rate, 2) if raw_rate is not None else None
-    baseline = (dataset.baselines.get((product.code, signal)) if dataset else Baseline.objects.filter(product__in=family, signal=signal).order_by('product_id').first()) if account_id is None or signal == 'NEGATIVE' else None
+    baseline = None
+    if account_id is None or signal == 'NEGATIVE':
+        baseline = (dataset.baseline(product.code, signal, account_id) if dataset else
+                    Baseline.objects.filter(product__in=family, signal=signal).order_by('product_id').first())
+        if baseline is None and signal == 'NEGATIVE' and dataset is None:
+            from .defaults import default_for_family
+            baseline = default_for_family(family, account_id)
     status, reason = 'WATCH', 'Порог не настроен'
     cluster = False
     cluster_selected = []

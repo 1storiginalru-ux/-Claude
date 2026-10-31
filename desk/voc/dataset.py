@@ -2,7 +2,7 @@
 from collections import defaultdict
 from django.db.models import F
 from django.utils import timezone
-from desk.models import Baseline, ProductMapping, SaleEvent, SalesDaily, SalesSyncState, SyncState, Thread
+from desk.models import Baseline, ControlDefaults, ProductMapping, SaleEvent, SalesDaily, SalesSyncState, SyncState, Thread
 from .windows import calculate_window
 
 
@@ -44,6 +44,24 @@ class ControlDataset:
         self.feedback_states = feedback_coverage(accounts)
         for baseline in Baseline.objects.filter(product__code__in=codes, product__company_id__in=self.company_ids).select_related('product').order_by('product_id'):
             self.baselines.setdefault((baseline.product.code, baseline.signal), baseline)
+        self.explicit_baselines = dict(self.baselines)
+        self.default_rules = {row.account_id: row for row in ControlDefaults.objects.filter(
+            account_id__in=accounts, account__company_id__in=self.company_ids)}
+        for code in codes:
+            rule = self.baseline(code, 'NEGATIVE')
+            if rule: self.baselines.setdefault((code, 'NEGATIVE'), rule)
+
+    def baseline(self, code, signal, account_id=None):
+        explicit = self.explicit_baselines.get((code, signal))
+        if explicit or signal != 'NEGATIVE':
+            return explicit
+        from .defaults import fallback_rule
+        accounts = {m.account_id for m in self.mappings[code] if account_id is None or m.account_id == account_id}
+        return fallback_rule(self.default_rules[pk] for pk in accounts if pk in self.default_rules)
+
+    def has_rule(self, code, signal):
+        return ((code, signal) in self.baselines or signal == 'NEGATIVE'
+                and any(m.account_id in self.default_rules for m in self.mappings[code]))
 
     def period(self, code, window='100', account_id=None):
         key = (code, window, account_id)

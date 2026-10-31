@@ -348,6 +348,28 @@ class Baseline(models.Model):
             raise ValidationError('Размеры выборки и кластера должны быть больше нуля.')
 
 
+class ControlDefaults(models.Model):
+    """Opt-in defaults; a physical product's explicit Baseline takes precedence."""
+    account = models.OneToOneField(Account, on_delete=models.CASCADE, related_name='control_defaults')
+    warning = models.FloatField(default=5, validators=[MinValueValidator(0)])
+    threshold = models.FloatField(default=10, validators=[MinValueValidator(0)])
+    min_redemptions = models.PositiveIntegerField(default=100, validators=[MinValueValidator(100), MaxValueValidator(100)])
+    min_signals = models.PositiveIntegerField(default=3, validators=[MinValueValidator(1)])
+    cluster_count = models.PositiveIntegerField(default=4, validators=[MinValueValidator(2)])
+    cluster_days = models.PositiveIntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(90)])
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        import math
+        from django.core.exceptions import ValidationError
+        if not math.isfinite(self.warning) or not math.isfinite(self.threshold) or self.warning >= self.threshold:
+            raise ValidationError('Задайте конечные пороги: предупреждение ниже расследования.')
+        if self.account_id and (self.account.company.is_demo or self.account.platform not in {'wb', 'ym'}):
+            raise ValidationError('Общее правило доступно для реальных кабинетов WB и Маркета.')
+
+    def __str__(self): return f'{self.account}: {self.warning} / {self.threshold}'
+
+
 class ReviewAssessment(models.Model):
     DECISIONS = [('negative', 'Негатив'), ('non_negative', 'Не негатив'), ('pending', 'Требует проверки')]
     thread = models.OneToOneField(Thread, on_delete=models.CASCADE, related_name='assessment')

@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import YandexOrderState, KnowledgeEntry, AIJob, AIRequest
+from .models import YandexOrderState, KnowledgeEntry, AIJob, AIRequest, ControlDefaults
 from django.forms.models import model_to_dict
 from .models import Account, Analysis, Audit, Baseline, Company, HistorySyncState, Incident, Membership, Message, Outgoing, Product, ProductMapping, ReviewAssessment, SaleEvent, SalesSyncState, SalesDaily, SyncLog, Team, Thread
 
@@ -71,6 +71,7 @@ admin.site.register(SalesSyncState, ReadOnlyAdmin)
 admin.site.register(HistorySyncState, ReadOnlyAdmin)
 admin.site.register(YandexOrderState, ReadOnlyAdmin)
 admin.site.register(ReviewAssessment, ReadOnlyAdmin)
+admin.site.register(ControlDefaults, ReadOnlyAdmin)
 admin.site.register(AIJob, ReadOnlyAdmin)
 admin.site.register(AIRequest, ReadOnlyAdmin)
 

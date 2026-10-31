@@ -25,7 +25,10 @@ class NegativeRuleForm(forms.Form):
     cluster_days = forms.IntegerField(label='Период серии, дней', min_value=1, max_value=90, initial=3)
 
     def clean(self):
+        import math
         data = super().clean()
+        if any(key in data and not math.isfinite(data[key]) for key in ['warning', 'threshold']):
+            raise forms.ValidationError('Пороги должны быть конечными числами.')
         if 'warning' in data and 'threshold' in data and data['warning'] >= data['threshold']:
             raise forms.ValidationError('Порог расследования должен быть выше порога предупреждения.')
         return data

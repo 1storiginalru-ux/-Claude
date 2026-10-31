@@ -113,7 +113,7 @@ def recheck_products():
     for product in products:
         from desk.voc.rules import PRODUCT_SIGNALS
         for signal in ['NEGATIVE', *PRODUCT_SIGNALS]:
-            if (product.code, signal) not in dataset.baselines: continue
+            if not dataset.has_rule(product.code, signal): continue
             metric = evaluate(product, signal, dataset=dataset)
             if metric['status'] == 'ANOMALY':
                 attach_metric_incident(product, metric)
