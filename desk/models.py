@@ -183,7 +183,9 @@ class SalesSyncState(models.Model):
 class AIBackfillState(models.Model):
     account = models.OneToOneField(Account, on_delete=models.CASCADE, related_name='ai_backfill')
     enabled = models.BooleanField(default=False)
+    months = models.PositiveSmallIntegerField(default=6, validators=[MinValueValidator(1), MaxValueValidator(120)])
     before_pk = models.PositiveBigIntegerField(default=0)
+    before_received_at = models.DateTimeField(null=True, blank=True)
     next_attempt = models.DateTimeField(default=timezone.now)
     status = models.CharField(max_length=240, blank=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -1,5 +1,5 @@
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -10,12 +10,105 @@ from desk.ai.backfill import refill, QUEUE_LIMIT
 from desk.ai.queue import enqueue, process_one
 from desk.models import AIBackfillState, AIJob, AIRequest, Analysis, ReplyDraft, Outgoing, ReviewAssessment
 from desk.reviews import fingerprint
+from desk.ai.backfill_period import period_start, OUTSIDE_PERIOD
 from .test_ai_queue import AIConfiguredCase, POSITIVE
 
 
 class AutomaticBackfillTests(AIConfiguredCase):
-    def enabled(self, account=None):
-        return AIBackfillState.objects.create(account=account or self.account, enabled=True)
+    def enabled(self, account=None, months=24):
+        return AIBackfillState.objects.create(account=account or self.account, enabled=True, months=months)
+
+    def test_calendar_months_include_clamped_boundary_day_in_moscow(self):
+        from zoneinfo import ZoneInfo
+        moscow = ZoneInfo('Europe/Moscow')
+        self.assertEqual(period_start(6, datetime(2026, 10, 31, 15, tzinfo=moscow)),
+                         datetime(2026, 4, 30, 0, tzinfo=moscow))
+        self.assertEqual(period_start(6, datetime(2024, 8, 31, 15, tzinfo=moscow)),
+                         datetime(2024, 2, 29, 0, tzinfo=moscow))
+
+    def test_only_reviews_inside_six_months_are_queued_including_boundary(self):
+        now = timezone.now()
+        cutoff = period_start(6, now)
+        self.enabled(months=6)
+        old = self.make_thread('too-old', received_at=cutoff-timedelta(microseconds=1))
+        edge = self.make_thread('boundary', received_at=cutoff)
+        future = self.make_thread('future', received_at=now+timedelta(days=1))
+        refill()
+        self.assertEqual(set(AIJob.objects.values_list('thread_id', flat=True)), {self.thread.pk, edge.pk})
+        self.assertFalse(AIJob.objects.filter(thread__in=[old, future]).exists())
+
+    @patch('desk.ai.queue.complete')
+    def test_already_queued_out_of_period_job_is_cancelled_before_any_paid_call(self, post):
+        state = self.enabled(months=24)
+        self.thread.received_at = timezone.now()-timedelta(days=400); self.thread.save()
+        refill(); job = AIJob.objects.get()
+        state.months=6; state.save()
+        process_one(); job.refresh_from_db()
+        self.assertEqual(job.status, 'cancelled'); self.assertEqual(job.error, OUTSIDE_PERIOD)
+        post.assert_not_called(); self.assertFalse(AIRequest.objects.exists())
+
+    def test_recent_review_is_scanned_before_later_imported_old_review_and_resume_is_stable(self):
+        state = self.enabled(months=6)
+        old = self.make_thread('later-imported-old', received_at=timezone.now()-timedelta(days=90))
+        with patch('desk.ai.backfill.QUEUE_LIMIT', 1):
+            refill()
+            self.assertEqual(AIJob.objects.get().thread_id, self.thread.pk)
+            state.refresh_from_db(); self.assertEqual(state.before_received_at, self.thread.received_at)
+            AIJob.objects.update(status='done')
+            AIBackfillState.objects.update(next_attempt=timezone.now())
+            refill()
+        self.assertTrue(AIJob.objects.filter(thread=old).exists())
+
+    def test_month_setting_cancels_old_background_jobs_and_retains_done_results_and_manual_jobs(self):
+        state = self.enabled(months=24)
+        old = self.make_thread('old-background', received_at=timezone.now()-timedelta(days=400))
+        done = self.make_thread('old-done', received_at=old.received_at)
+        self.analysis(done)
+        refill()
+        done_job = enqueue(done, classification_only=True, backfill=True)
+        AIJob.objects.filter(pk=done_job.pk).update(status='done')
+        manual = self.make_thread('old-manual', received_at=old.received_at)
+        manual_job = enqueue(manual, classification_only=True)
+        before = Analysis.objects.values().get(thread=done)
+        with tempfile.TemporaryDirectory() as folder, override_settings(STATE_DIR=Path(folder)):
+            call_command('analysis_backlog', '--account', self.account.name, months=6, enable=True, apply=True, stdout=StringIO())
+        state.refresh_from_db(); self.assertEqual(state.months, 6)
+        self.assertEqual(state.before_pk, 0); self.assertIsNone(state.before_received_at)
+        self.assertEqual(AIJob.objects.get(thread=old).status, 'cancelled')
+        done_job.refresh_from_db(); self.assertEqual(done_job.status, 'done')
+        manual_job.refresh_from_db(); self.assertEqual(manual_job.status, 'queued')
+        self.assertEqual(Analysis.objects.values().get(thread=done), before)
+
+    def test_preview_months_does_not_change_scope_or_cancel_jobs(self):
+        self.enabled(months=24)
+        self.thread.received_at=timezone.now()-timedelta(days=400); self.thread.save()
+        refill()
+        out=StringIO()
+        call_command('analysis_backlog','--account',self.account.name,months=6,stdout=out)
+        self.assertIn('всего 0',out.getvalue())
+        self.assertEqual(AIBackfillState.objects.get().months,24)
+        self.assertEqual(AIJob.objects.get().status,'queued')
+
+    def test_apply_cleans_legacy_queue_even_when_six_month_setting_already_matches(self):
+        state=self.enabled(months=24)
+        old=self.make_thread('legacy-old',received_at=timezone.now()-timedelta(days=400))
+        enqueue(old,classification_only=True,backfill=True)
+        state.months=6;state.save()
+        with tempfile.TemporaryDirectory() as folder,override_settings(STATE_DIR=Path(folder)):
+            call_command('analysis_backlog','--account',self.account.name,months=6,enable=True,apply=True,stdout=StringIO())
+        self.assertEqual(AIJob.objects.get().status,'cancelled')
+        self.assertEqual(AIBackfillState.objects.get().months,6)
+
+    @patch('desk.ai.queue.complete')
+    def test_already_queued_archive_jobs_are_processed_by_publication_date(self,post):
+        self.enabled(months=6)
+        old=self.make_thread('older-high-pk',received_at=timezone.now()-timedelta(days=90))
+        enqueue(old,classification_only=True,backfill=True)
+        recent=enqueue(self.thread,classification_only=True,backfill=True)
+        post.return_value=self.answer(POSITIVE)
+        process_one();recent.refresh_from_db()
+        self.assertEqual(recent.status,'done')
+        self.assertEqual(AIJob.objects.get(thread=old).status,'queued')
 
     @patch('desk.ai.queue.complete')
     def test_opt_in_scans_saved_reviews_without_inline_calls_and_never_rewrites_reply(self, post):

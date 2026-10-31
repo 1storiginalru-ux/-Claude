@@ -3,7 +3,7 @@ import json
 import uuid
 from datetime import datetime, time, timedelta
 from django.db import transaction
-from django.db.models import Sum, Case, When, Value, IntegerField
+from django.db.models import Sum, Case, When, Value, IntegerField, DateTimeField, F
 from django.utils import timezone
 from desk.models import AIJob, AIRequest, Analysis, Audit, Company, Thread
 from desk.voc.rules import human_only, MIN_CLASSIFICATION_CONFIDENCE
@@ -47,7 +47,12 @@ def enqueue(thread, actor=None, *, force=False, retry_failed=False, draft_only=F
     if company.is_demo or not thread.account.enabled:
         raise AIProblem('AI доступен только для подключённого реального кабинета.')
     source, config, snapshot = prepare_classification(thread) if classification_only else prepare(thread)
-    if backfill: snapshot['backfill'] = True
+    if backfill:
+        from desk.models import AIBackfillState
+        from .backfill_period import in_period, OUTSIDE_PERIOD
+        state = AIBackfillState.objects.filter(account_id=thread.account_id).first()
+        if not in_period(thread.received_at, state): raise AIProblem(OUTSIDE_PERIOD)
+        snapshot['backfill'] = True
     validate_settings(snapshot)
     active = list(AIJob.objects.filter(thread=thread, status__in=['queued', 'retry', 'blocked', 'running']))
     obsolete = [j.pk for j in active if j.source_fingerprint != source or
@@ -75,7 +80,8 @@ def enqueue(thread, actor=None, *, force=False, retry_failed=False, draft_only=F
     job, created = AIJob.objects.get_or_create(thread=thread, source_fingerprint=source, config_fingerprint=config,
                                               defaults={'actor': actor, 'snapshot': snapshot, 'classification': cached})
     restore_cached = classification_only and job.status == 'done' and not checkpoint_matches(job) and bool(job.classification)
-    if not created and (retry_failed and job.status in {'failed', 'cancelled', 'blocked'} or force and job.status == 'done' or restore_cached):
+    return_to_period = backfill and job.status == 'cancelled' and job.error == OUTSIDE_PERIOD
+    if not created and (retry_failed and job.status in {'failed', 'cancelled', 'blocked'} or force and job.status == 'done' or restore_cached or return_to_period):
         job.status, job.error, job.attempts = 'queued', '', 0
         job.next_attempt, job.lease_token, job.lease_until = timezone.now(), None, None
         if force and not draft_only: job.classification = {}
@@ -99,6 +105,11 @@ def current_thread(job):
         thread = case_subject(case)
     else:
         thread = Thread.objects.select_related('account__company', 'product', 'assessment').get(pk=job.thread_id)
+        if job.snapshot.get('backfill'):
+            from desk.models import AIBackfillState
+            from .backfill_period import in_period, OUTSIDE_PERIOD
+            state = AIBackfillState.objects.filter(account_id=thread.account_id).first()
+            if not in_period(thread.received_at, state): raise StaleJob(OUTSIDE_PERIOD)
         source, config, _ = prepare_classification(thread) if job.snapshot.get('classification_only') else prepare(thread)
     if source != job.source_fingerprint or config != job.config_fingerprint or thread.account.company.is_demo or not thread.account.enabled:
         raise StaleJob
@@ -171,8 +182,10 @@ def process_one():
     expired.filter(attempts__gte=MAX_ATTEMPTS).update(status='failed', error='Worker прерывался несколько раз. Повторите вручную.', lease_token=None, lease_until=None)
     expired.update(status='retry', next_attempt=now, lease_token=None, lease_until=None, error='Worker прерван; задача будет продолжена.')
     candidate = AIJob.objects.filter(status__in=['queued', 'retry', 'blocked'], next_attempt__lte=now).annotate(
-        background_order=Case(When(snapshot__backfill=True, then=Value(1)), default=Value(0), output_field=IntegerField())
-    ).order_by('background_order', 'next_attempt', 'pk').first()
+        background_order=Case(When(snapshot__backfill=True, then=Value(1)), default=Value(0), output_field=IntegerField()),
+        background_date=Case(When(snapshot__backfill=True, then=F('thread__received_at')),
+                             default=Value(None), output_field=DateTimeField())
+    ).order_by('background_order', '-background_date', 'next_attempt', 'pk').first()
     if not candidate: return False
     token = uuid.uuid4()
     if not AIJob.objects.filter(pk=candidate.pk, status__in=['queued', 'retry', 'blocked'], next_attempt__lte=now).update(
@@ -256,8 +269,8 @@ def process_one():
         from desk.incidents.service import evaluate_incidents
         fresh = Thread.objects.select_related('analysis', 'assessment', 'account', 'product').get(pk=thread.pk)
         evaluate_incidents(fresh, actor=job.actor)
-    except StaleJob:
-        AIJob.objects.filter(pk=job.pk, lease_token=token).update(status='cancelled', error='Отзыв или настройки изменились. Запустите анализ новой версии.', lease_token=None, lease_until=None)
+    except StaleJob as error:
+        AIJob.objects.filter(pk=job.pk, lease_token=token).update(status='cancelled', error=str(error) or 'Отзыв или настройки изменились. Запустите анализ новой версии.', lease_token=None, lease_until=None)
     except TokenLimit as error:
         next_month = (timezone.localdate().replace(day=28) + timedelta(days=4)).replace(day=1)
         due = timezone.make_aware(datetime.combine(next_month, time.min))

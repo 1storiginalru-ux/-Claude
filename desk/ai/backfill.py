@@ -8,6 +8,7 @@ from desk.reviews import effective_analysis
 from desk.voc.rules import trusted_analysis
 from .provider import AIProblem
 from .queue import enqueue
+from .backfill_period import period_start, cancel_outside_period
 
 SCAN_SIZE = 200
 QUEUE_LIMIT = 20
@@ -24,6 +25,7 @@ def refill():
             Company.objects.select_for_update(no_key=True).get(pk=company_id)
             state = AIBackfillState.objects.select_for_update(of=('self',), no_key=True).select_related('account__company').get(pk=pk)
             if not state.enabled or state.next_attempt > now: continue
+            cancel_outside_period(state, now)
             company = state.account.company
             failure = AIJob.objects.filter(thread__account__company=company, snapshot__backfill=True,
                 snapshot__provider=company.ai_provider, snapshot__model=company.ai_model,
@@ -40,9 +42,12 @@ def refill():
                 state.next_attempt = now + timedelta(seconds=60)
                 state.status = 'Ожидает задач компании или месячного лимита; новая платная партия не добавляется.'
                 state.save(); continue
-            rows = Thread.objects.filter(account=state.account, kind='review')
-            if state.before_pk: rows = rows.filter(pk__lt=state.before_pk)
-            rows = list(rows.select_related('account__company', 'product', 'analysis', 'assessment').order_by('-pk')[:SCAN_SIZE])
+            rows = Thread.objects.filter(account=state.account, kind='review',
+                                         received_at__gte=period_start(state.months, now), received_at__lte=now)
+            if state.before_received_at:
+                rows = rows.filter(Q(received_at__lt=state.before_received_at) |
+                                   Q(received_at=state.before_received_at, pk__lt=state.before_pk))
+            rows = list(rows.select_related('account__company', 'product', 'analysis', 'assessment').order_by('-received_at', '-pk')[:SCAN_SIZE])
             added, scanned = 0, 0
             for thread in rows:
                 scanned += 1
@@ -58,10 +63,12 @@ def refill():
                     if job.status in {'queued', 'retry', 'blocked', 'running'}:
                         slots -= 1; added += 1
                 state.before_pk = thread.pk
+                state.before_received_at = thread.received_at
                 if not slots: break
             else:
                 if len(rows) < SCAN_SIZE:
                     state.before_pk = 0
+                    state.before_received_at = None
                     state.next_attempt = now + timedelta(minutes=30)
                     state.status = 'Обход сохранённых отзывов завершён. Повторная проверка изменений — через 30 минут.'
                     state.save(); queued += added; continue
