@@ -27,6 +27,18 @@ class AITests(DeskCase):
         for key, value in [('hidden_negative', 'false'), ('signals', ['INVENTED']), ('confidence', float('nan')), ('confidence', True), ('summary', None)]:
             with self.subTest(key=key), self.assertRaises(AIProblem): validate_result({**VALID, key: value})
 
+    def test_equivalent_codes_are_normalized_without_changing_confidence_or_human_only(self):
+        result = validate_result({**VALID, 'requires_human': False,
+                                  'signals': [' auth_longevity ', 'LONGEVITY', 'packaging', 'LONG']})
+        self.assertEqual(result['signals'], ['AUTH-LONGEVITY', 'LONG', 'PACK'])
+        self.assertEqual(result['confidence'], VALID['confidence'])
+        self.assertTrue(result['requires_human']); self.assertEqual(result['draft'], '')
+
+    def test_unknown_or_ambiguous_signal_is_not_guessed_or_dropped(self):
+        for signal in ['LONG_AUTH', 'POSITIVE', 'ORIGINAL', 'INVENTED', {'code': 'LONG'}]:
+            with self.subTest(signal=signal), self.assertRaisesRegex(AIProblem, 'Неизвестный VoC-сигнал:'):
+                validate_result({**VALID, 'signals': ['LONG', signal]})
+
     @patch('desk.ai.provider.requests.post')
     @patch.dict(os.environ, {'TEST_AI_KEY': 'test-only-placeholder'})
     def test_prompt_is_scoped_to_thread_company(self, post):

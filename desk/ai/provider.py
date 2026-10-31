@@ -11,15 +11,38 @@ from .classification import local_classify, review_sections, RULES_VERSION, PROM
 class AIProblem(ValueError): pass
 
 
+class SignalProblem(AIProblem):
+    """Unknown categories cannot become a trusted fallback classification."""
+
+
+SIGNAL_ALIASES = {
+    'LONGEVITY': 'LONG', 'PACKAGING': 'PACK', 'MARKING': 'MARK',
+    'DESCRIPTION': 'CONTENT', 'AUTHENTICITY': 'AUTH-UNKNOWN',
+}
+
+
+def normalize_signals(signals):
+    if not isinstance(signals, list): raise SignalProblem('Поле VoC signals должно быть списком.')
+    normalized, unknown = [], []
+    for value in signals:
+        code = value.strip().upper().replace('_', '-') if isinstance(value, str) else None
+        code = SIGNAL_ALIASES.get(code, code)
+        if code in SIGNALS: normalized.append(code)
+        else: unknown.append(value)
+    if unknown:
+        # Keep the actual code in the diagnostic, bounded for AIJob.error.
+        detail = json.dumps(unknown[:5], ensure_ascii=False, default=str)[:210]
+        raise SignalProblem('Неизвестный VoC-сигнал: ' + detail)
+    return sorted(set(normalized))
+
+
 def validate_result(data):
     if not isinstance(data, dict): raise AIProblem('AI вернул не объект.')
     for key in ['hidden_negative', 'objective_issue', 'requires_human']:
         if type(data.get(key)) is not bool: raise AIProblem(f'Некорректный флаг {key}.')
     if data.get('sentiment') not in {'positive', 'neutral', 'negative'} or data.get('severity') not in {'P0', 'P1', 'P2', 'P3'}:
         raise AIProblem('Некорректная тональность или severity.')
-    signals = data.get('signals')
-    if not isinstance(signals, list) or any(not isinstance(x, str) or x not in SIGNALS for x in signals):
-        raise AIProblem('Неизвестный VoC-сигнал.')
+    signals = normalize_signals(data.get('signals'))
     confidence = data.get('confidence')
     if type(confidence) not in {float, int} or not math.isfinite(confidence) or not 0 <= confidence <= 1:
         raise AIProblem('Некорректный confidence.')

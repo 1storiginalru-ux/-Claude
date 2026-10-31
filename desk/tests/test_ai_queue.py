@@ -47,6 +47,50 @@ class AIConfiguredCase(DeskCase):
 
 
 class AIQueueTests(AIConfiguredCase):
+    def test_command_retries_only_requested_thread_and_respects_account_scope(self):
+        other = self.make_thread('leave-failed', text='Коробка повреждена')
+        first = enqueue(self.thread, classification_only=True)
+        second = enqueue(other, classification_only=True)
+        AIJob.objects.update(status='failed', error='Неизвестный VoC-сигнал.', attempts=5)
+        call_command('enqueue_ai', account=self.ym.name, thread=self.thread.pk,
+                     classification_only=True, apply=True, stdout=StringIO())
+        first.refresh_from_db(); self.assertEqual(first.status, 'failed')
+        call_command('enqueue_ai', account=self.account.name, thread=self.thread.pk,
+                     classification_only=True, stdout=StringIO())
+        first.refresh_from_db(); self.assertEqual(first.status, 'failed')
+        call_command('enqueue_ai', account=self.account.name, thread=self.thread.pk,
+                     classification_only=True, apply=True, stdout=StringIO())
+        first.refresh_from_db(); second.refresh_from_db()
+        self.assertEqual(first.status, 'queued'); self.assertEqual(first.attempts, 0)
+        self.assertEqual(second.status, 'failed'); self.assertEqual(second.attempts, 5)
+        self.assertFalse(AIRequest.objects.exists() or Outgoing.objects.exists())
+
+    @patch('desk.ai.queue.complete')
+    def test_unknown_signal_is_retained_and_fails_once_without_a_trusted_fallback(self, post):
+        from desk.models import Audit
+        old = self.analysis(self.thread, provider='rules', confidence=0)
+        before = Analysis.objects.values().get(pk=old.pk)
+        raw = {**POSITIVE, 'signals': ['INVENTED']}
+        post.return_value = self.answer(raw)
+        job = enqueue(self.thread, classification_only=True)
+        process_one(); job.refresh_from_db()
+        self.assertEqual(job.status, 'failed'); self.assertEqual(job.attempts, 1)
+        self.assertIn('INVENTED', job.error)
+        self.assertEqual(Audit.objects.get(action='ai.classification_invalid').after['response'], raw)
+        self.assertEqual(Analysis.objects.values().get(pk=old.pk), before)
+        self.assertEqual(AIRequest.objects.get().budget_tokens, 150)
+        self.assertFalse(job.classification or Outgoing.objects.exists())
+        self.assertFalse(process_one()); self.assertEqual(post.call_count, 1)
+
+    @patch('desk.ai.queue.complete')
+    def test_canonical_alias_does_not_need_another_paid_attempt(self, post):
+        self.thread.text = 'Коробка помята'; self.thread.save()
+        post.return_value = self.answer({**NEGATIVE, 'signals': [' packaging ']})
+        job = enqueue(self.thread, classification_only=True)
+        process_one(); job.refresh_from_db()
+        self.assertEqual(job.status, 'done'); self.assertEqual(post.call_count, 1)
+        self.assertEqual(Analysis.objects.get(thread=self.thread).signals, ['PACK'])
+
     @patch('desk.ai.queue.complete')
     def test_two_stages_keep_style_out_of_classification_and_never_publish(self, post):
         self.company.knowledge = 'Подтверждённые правила упаковки.'; self.company.save()

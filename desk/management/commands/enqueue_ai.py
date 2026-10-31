@@ -11,6 +11,7 @@ class Command(BaseCommand):
         scope = parser.add_mutually_exclusive_group(required=True)
         scope.add_argument('--account'); scope.add_argument('--legal-entity')
         parser.add_argument('--product')
+        parser.add_argument('--thread', type=int, help='ID одного обращения в Voice; остальные отзывы не затрагиваются.')
         parser.add_argument('--limit', type=int, default=30)
         parser.add_argument('--force', action='store_true')
         parser.add_argument('--classification-only', action='store_true',
@@ -22,6 +23,7 @@ class Command(BaseCommand):
         rows = Thread.objects.filter(account__company__is_demo=False, account__enabled=True, kind='review').exclude(account__company__ai_provider='none')
         rows = rows.filter(account__name=o['account']) if o['account'] else rows.filter(account__company__legal_entity=o['legal_entity'])
         if o['product']: rows = rows.filter(product__code=o['product'])
+        if o['thread'] is not None: rows = rows.filter(pk=o['thread'])
         rows = rows.exclude(assessment__decision__in=['negative', 'non_negative']).select_related('account__company', 'product', 'analysis', 'assessment').order_by('-received_at', '-pk')
         if o['classification_only']:
             self.stdout.write('Только классификация для контроля товара. Тексты черновиков не меняются.')

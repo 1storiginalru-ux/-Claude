@@ -11,7 +11,7 @@ from .classification import local_classify
 from .ratings import rating_result, VERSION as RATING_VERSION
 from .context import PIPELINE_VERSION, prepare, prepare_classification
 from .client import ProviderProblem, complete, validate_settings
-from .provider import AIProblem, validate_result
+from .provider import AIProblem, SignalProblem, validate_result
 from .drafting import DRAFTER, BASELINE_DRAFTER, validate_draft, review_notes
 from desk.replies.policy import plan, public_plan, template_text
 from desk.replies.service import store_result, prepare_case, case_subject
@@ -34,6 +34,8 @@ CLASSIFIER = (
     'LONG and all AUTH are one Human Only group. RETURN, MARK, safety/P0 and serious DEFECT are Human Only. '
     'For Human Only or uncertainty set requires_human=true. Be conservative about confidence. '
     'objective_issue indicates a concrete issue needing investigation, not proof of a defect. '
+    'Use the exact signal codes from the list: longevity complaints are LONG, packaging is PACK, '
+    'description mismatch is CONTENT. Never invent category codes or return sentiment as a signal. '
     'Do not write a customer reply.'
 )
 
@@ -237,6 +239,13 @@ def process_one():
         if not data:
             raw = call(job, 'classification', CLASSIFIER, job.snapshot['source'], 768)
             try: data = validate_result({**raw, 'draft': ''})
+            except SignalProblem as error:
+                # The paid answer is retained for diagnosis/offline recovery.
+                # Repeating the same invalid category automatically wastes tokens.
+                Audit.objects.create(company=job.company, actor=job.actor, action='ai.classification_invalid',
+                    object_id=str(job.pk), after={'response': raw, 'error': str(error), 'attempt': job.attempts,
+                                                'source': job.source_fingerprint, 'config': job.config_fingerprint})
+                raise ProviderProblem(str(error), retryable=False) from error
             except AIProblem as error: raise ProviderProblem(str(error), retryable=True) from error
             if thread.kind == 'review' and thread.rating and thread.rating >= 4 and data['sentiment'] == 'negative': data['hidden_negative'] = True
             local = local_classify(thread.text, thread.rating, sections=job.snapshot['source']['review_sections'], kind=thread.kind)
