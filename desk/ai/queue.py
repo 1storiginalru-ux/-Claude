@@ -125,6 +125,9 @@ def current_thread(job):
 
 def call(job, stage, system, context, max_tokens):
     validate_settings(job.snapshot)
+    base_tokens = max_tokens
+    limits = job.snapshot.get('output_token_limits', {})
+    if limits.get(stage) == base_tokens * 2: max_tokens = base_tokens * 2
     # Conservative reservation in bytes, not a guessed language token ratio.
     # A response without verifiable usage keeps the reservation charged against
     # the local limit. Crashes therefore cannot erase possibly billable calls.
@@ -147,7 +150,19 @@ def call(job, stage, system, context, max_tokens):
         AIRequest.objects.filter(pk=invocation.pk).update(state='confirmed', input_tokens=counts[0], output_tokens=counts[1], budget_tokens=sum(counts))
     else:
         AIRequest.objects.filter(pk=invocation.pk).update(state='uncertain')
-    if not stopped: raise ProviderProblem('Ответ AI прерван или не завершён. Повтор будет ограничен.', retryable=True)
+    if not stopped:
+        reason = getattr(stopped, 'reason', 'unknown')
+        retry = reason == 'length' and max_tokens == base_tokens
+        with transaction.atomic():
+            current_thread(job)
+            if retry:
+                job.snapshot = {**job.snapshot, 'output_token_limits': {**limits, stage: base_tokens * 2}}
+                AIJob.objects.filter(pk=job.pk, lease_token=job.lease_token, status='running').update(snapshot=job.snapshot)
+            Audit.objects.create(company=job.company, actor=job.actor, action='ai.incomplete_response', object_id=str(job.pk),
+                after={'request': invocation.pk, 'stage': stage, 'finish_reason': reason, 'max_tokens': max_tokens,
+                       'usage_confirmed': bool(counts), 'content_chars': len(raw), 'retry_scheduled': retry})
+        suffix = 'Одна повторная попытка с увеличенным выходным лимитом.' if retry else 'Автоматический повтор не выполняется.'
+        raise ProviderProblem(f'Ответ AI не завершён: {reason}. {suffix}', retryable=retry)
     try:
         data = json.loads(raw)
         if not isinstance(data, dict): raise ValueError

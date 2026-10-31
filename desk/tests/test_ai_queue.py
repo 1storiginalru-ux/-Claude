@@ -15,7 +15,7 @@ from django.core.management.base import CommandError
 from django.urls import reverse
 from django.utils import timezone
 from desk.models import AIJob, AIRequest, Analysis, Company, KnowledgeEntry, Message, Outgoing, ReviewAssessment
-from desk.ai.client import complete, list_yandex_models, ProviderProblem
+from desk.ai.client import complete, list_yandex_models, ProviderProblem, CompletionEnd
 from desk.ai.context import prepare, source_digest
 from desk.ai.queue import enqueue, process_one
 from desk.reviews import effective_analysis, fingerprint
@@ -47,6 +47,64 @@ class AIConfiguredCase(DeskCase):
 
 
 class AIQueueTests(AIConfiguredCase):
+    @patch('desk.ai.queue.complete')
+    def test_filtered_response_stops_after_one_call_and_keeps_unknown_usage_reservation(self, post):
+        from desk.models import Audit
+        post.return_value = 'private refusal text', None, CompletionEnd('content_filter')
+        job = enqueue(self.thread, classification_only=True)
+        process_one(); job.refresh_from_db()
+        self.assertEqual(job.status, 'failed'); self.assertEqual(job.attempts, 1)
+        self.assertIn('content_filter', job.error)
+        request = AIRequest.objects.get()
+        self.assertEqual(request.state, 'uncertain'); self.assertGreater(request.budget_tokens, 0)
+        diagnostic = Audit.objects.get(action='ai.incomplete_response').after
+        self.assertEqual(diagnostic['finish_reason'], 'content_filter')
+        self.assertFalse(diagnostic['usage_confirmed'] or diagnostic['retry_scheduled'])
+        self.assertNotIn('private refusal text', str(diagnostic))
+        self.assertFalse(process_one()); self.assertEqual(post.call_count, 1)
+        self.assertFalse(Analysis.objects.exists() or Outgoing.objects.exists())
+
+    @patch('desk.ai.queue.complete')
+    def test_unknown_termination_is_diagnosed_without_five_blind_repeats(self, post):
+        post.return_value = '', None, CompletionEnd('unknown')
+        job = enqueue(self.thread, classification_only=True)
+        process_one(); job.refresh_from_db()
+        self.assertEqual(job.status, 'failed'); self.assertIn('unknown', job.error)
+        self.assertFalse(process_one()); self.assertEqual(post.call_count, 1)
+
+    @patch('desk.ai.queue.complete')
+    def test_output_limit_retries_once_with_more_tokens_and_preserves_usage(self, post):
+        post.side_effect = [('partial', (120, 768), CompletionEnd('length')), self.answer(POSITIVE)]
+        job = enqueue(self.thread, classification_only=True)
+        process_one(); job.refresh_from_db()
+        self.assertEqual(job.status, 'retry')
+        self.assertEqual(job.snapshot['output_token_limits'], {'classification': 1536})
+        AIJob.objects.filter(pk=job.pk).update(next_attempt=timezone.now())
+        process_one(); job.refresh_from_db()
+        self.assertEqual(job.status, 'done')
+        self.assertEqual([c.args[3] for c in post.call_args_list], [768, 1536])
+        self.assertEqual(list(AIRequest.objects.order_by('pk').values_list('budget_tokens', flat=True)), [888, 150])
+
+    @patch('desk.ai.queue.complete')
+    def test_repeated_output_truncation_stops_at_bounded_larger_limit(self, post):
+        post.return_value = 'partial', (120, 768), CompletionEnd('length')
+        job = enqueue(self.thread, classification_only=True)
+        process_one()
+        AIJob.objects.filter(pk=job.pk).update(next_attempt=timezone.now())
+        process_one(); job.refresh_from_db()
+        self.assertEqual(job.status, 'failed'); self.assertEqual(job.attempts, 2)
+        self.assertFalse(process_one()); self.assertEqual(post.call_count, 2)
+        self.assertFalse(Analysis.objects.exists() or Outgoing.objects.exists())
+
+    @patch('desk.ai.queue.complete')
+    def test_draft_refusal_keeps_successful_classification_and_creates_no_reply(self, post):
+        from desk.models import ReplyDraft
+        post.side_effect = [self.answer(POSITIVE), ('', None, CompletionEnd('refusal'))]
+        job = enqueue(self.thread)
+        process_one(); job.refresh_from_db()
+        self.assertEqual(job.status, 'failed'); self.assertTrue(job.classification)
+        self.assertFalse(ReplyDraft.objects.exists() or Outgoing.objects.exists())
+
     def test_command_retries_only_requested_thread_and_respects_account_scope(self):
         other = self.make_thread('leave-failed', text='Коробка повреждена')
         first = enqueue(self.thread, classification_only=True)
@@ -371,6 +429,29 @@ class AIQueueTests(AIConfiguredCase):
 
 
 class YandexClientTests(AIConfiguredCase):
+    @patch('desk.ai.client.requests.post')
+    def test_provider_finish_reason_and_refusal_are_kept_without_exposing_body(self, post):
+        _, _, snapshot = prepare(self.thread)
+        for finish, refusal, expected in [('length', None, 'length'), ('content_filter', None, 'content_filter'),
+                                          ('stop', 'private refusal', 'refusal'), (None, None, 'unknown')]:
+            with self.subTest(finish=finish, refusal=bool(refusal)):
+                post.return_value = Mock(status_code=200)
+                post.return_value.json.return_value = {'choices': [{'message': {'content': None if refusal else '',
+                    'refusal': refusal}, 'finish_reason': finish}]}
+                raw, usage, end = complete(snapshot, 'JSON', {}, 32)
+                self.assertEqual(end.reason, expected); self.assertFalse(end)
+                self.assertIsNone(usage); self.assertEqual(raw, '')
+
+    @patch('desk.ai.client.requests.post')
+    def test_anthropic_max_tokens_is_known_output_truncation(self, post):
+        _, _, snapshot = prepare(self.thread); snapshot['provider'] = 'anthropic'
+        post.return_value = Mock(status_code=200)
+        post.return_value.json.return_value = {'content': [{'type': 'text', 'text': 'partial'}],
+            'stop_reason': 'max_tokens', 'usage': {'input_tokens': 10, 'output_tokens': 32}}
+        raw, usage, end = complete(snapshot, 'JSON', {}, 32)
+        self.assertEqual((raw, usage, end.reason), ('partial', (10, 32), 'length'))
+        self.assertFalse(end)
+
     @patch('desk.ai.client.requests.post')
     def test_yandex_contract_has_json_model_uri_key_project_and_real_usage(self, post):
         _, _, snap = prepare(self.thread)

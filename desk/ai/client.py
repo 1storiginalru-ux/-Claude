@@ -1,6 +1,7 @@
 """Explicit provider contracts; errors never include response bodies or keys."""
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import requests
@@ -11,6 +12,22 @@ class ProviderProblem(AIProblem):
     def __init__(self, message, *, retryable=False, retry_after=0, rejected=False):
         super().__init__(message)
         self.retryable, self.retry_after, self.rejected = retryable, retry_after, rejected
+
+
+@dataclass(frozen=True)
+class CompletionEnd:
+    reason: str
+
+    def __bool__(self):
+        return self.reason == 'stop'
+
+
+def completion_end(value, *, refusal=False):
+    if refusal: return CompletionEnd('refusal')
+    value = {'end_turn': 'stop', 'max_tokens': 'length'}.get(value, value) if isinstance(value, str) else None
+    # Only provider termination metadata is exposed, never a refusal body.
+    return CompletionEnd(value if value in {'stop', 'length', 'content_filter', 'refusal', 'tool_calls',
+                                           'function_call', 'pause_turn', 'error'} else 'unknown')
 
 
 def headers(snapshot):
@@ -75,13 +92,17 @@ def complete(snapshot, system, context, max_tokens):
             raw = ''.join(p['text'] for p in payload['content'] if p.get('type') == 'text')
             usage = payload.get('usage', {})
             counts = (usage.get('input_tokens'), usage.get('output_tokens'))
-            stopped = payload.get('stop_reason') == 'end_turn'
+            stopped = completion_end(payload.get('stop_reason'))
         else:
             choice = payload['choices'][0]
-            raw = choice['message']['content']
+            message = choice['message']
+            refusal = bool(message.get('refusal'))
+            raw = message.get('content')
+            if raw is None and refusal: raw = ''
             usage = payload.get('usage', {})
             counts = (usage.get('prompt_tokens'), usage.get('completion_tokens'))
-            stopped = choice.get('finish_reason') == 'stop'
+            stopped = completion_end(choice.get('finish_reason'), refusal=refusal)
+        if not isinstance(raw, str): raise ValueError
         if not all(type(n) is int and 0 <= n <= 100000000 for n in counts): counts = None
         return raw, counts, stopped
     except (ValueError, KeyError, IndexError, TypeError) as error:
