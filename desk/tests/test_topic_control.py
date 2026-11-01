@@ -6,12 +6,13 @@ from pathlib import Path
 import tempfile
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.core.exceptions import PermissionDenied
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.db import connection
 from desk.models import Account, AIJob, AIRequest, Analysis, Audit, Baseline, Company, ControlDefaults, ControlTopicRule, HistorySyncState, Incident, Membership, Outgoing, Product, ProductMapping, SaleEvent, SalesSyncState, SyncState
 from desk.voc.dataset import ControlDataset
-from desk.voc.profile import preview_profile
+from desk.voc.profile import save_rule
 from desk.voc.rules import evaluate
 from desk.voc.queue import product_queue
 from desk.voc.topics import CONTROL_SIGNALS, PROFILE_RATES, starter_profile
@@ -234,6 +235,14 @@ class ControlTopicPermissionsTests(TopicControlCase):
         self.assertEqual(self.client.get('/voc/rules/',{'account':self.other_account.pk}).status_code,404)
         self.assertEqual(self.client.post('/voc/rules/',{**self.payload(),'account':self.other_account.pk}).status_code,404)
         self.assertFalse(ControlTopicRule.objects.exists())
+
+    def test_service_rechecks_permission_for_the_locked_accounts_company(self):
+        with self.assertRaises(PermissionDenied):
+            save_rule(self.account,'PACK',starter_profile()['PACK'],actor=self.user)
+        Membership.objects.filter(user=self.user,company=self.company).update(role='quality')
+        with self.assertRaises(PermissionDenied):
+            save_rule(self.other_account,'PACK',starter_profile()['PACK'],actor=self.user)
+        self.assertFalse(ControlTopicRule.objects.exists() or Audit.objects.exists())
 
     def test_quality_can_edit_topic_and_stale_form_cannot_overwrite_new_settings(self):
         Membership.objects.filter(user=self.user,company=self.company).update(role='quality')

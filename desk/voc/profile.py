@@ -26,6 +26,9 @@ def validate_rule(account, signal, values):
 @transaction.atomic
 def save_rule(account, signal, values, actor=None, expected_version=None):
     account = Account.objects.select_for_update(of=('self',), no_key=True).select_related('company').get(pk=account.pk)
+    if actor is not None:
+        from desk.access import require_role
+        require_role(actor, account.company_id, ['supervisor', 'quality'])
     validate_rule(account, signal, values)
     model = rule_model(signal)
     lookup = {'account': account, **({} if signal == 'NEGATIVE' else {'signal': signal})}
