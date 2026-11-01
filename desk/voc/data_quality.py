@@ -3,6 +3,7 @@ from collections import Counter, defaultdict
 from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 from desk.ai.backfill_period import period_start
+from desk.integrations.ym_scan import progress as market_sales_progress
 from desk.models import Company, HistorySyncState, Product, ProductMapping, SaleEvent, SalesSyncState, SyncState, Thread, YandexOrderState
 from .dataset import ControlDataset
 from .rules import is_negative, review_summary, trusted_analysis
@@ -28,6 +29,7 @@ def state_snapshot(state):
     return {key: getattr(state, key, None) for key in ['coverage_since', 'coverage_until', 'next_attempt', 'status']} | {
         'continuation': bool(getattr(state, 'cursor', None)),
         'lease_until': getattr(state, 'lease_until', None),
+        'progress': market_sales_progress(getattr(state, 'cursor', {}) or {}),
     }
 
 

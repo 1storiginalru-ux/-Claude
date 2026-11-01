@@ -1,6 +1,6 @@
 import os
 from django.core.management.base import BaseCommand, CommandError
-from django.db.models import Q
+from django.db.models import Q, Count, Min, Max
 from desk.integrations.window import sync_window
 from desk.models import Account, ProductMapping, SaleEvent, YandexOrderState
 
@@ -31,6 +31,9 @@ class Command(BaseCommand):
             subset = events.filter(sku=sku)
             label='nmId' if account.platform=='wb' else 'offerId'
             self.stdout.write(f'{label} {sku}: выкупов {subset.filter(kind="sale").count()}, возвратов {subset.filter(kind="return").count()}; ProductID: {ProductMapping.objects.filter(account=account, sku=sku).values_list("product__code", flat=True).first() or "не сопоставлен"}')
+            saved = SaleEvent.objects.filter(account=account, sku=sku, kind='sale', occurred_at__lte=until).aggregate(
+                total=Count('pk'), first=Min('occurred_at'), last=Max('occurred_at'))
+            self.stdout.write(f'  Все сохранённые выкупы: {saved["total"]}; первый: {saved["first"]}; последний: {saved["last"]}.')
         if hasattr(account, 'sales_state'):
             state = account.sales_state
             self.stdout.write(f'Результат: {state.status}. Следующая попытка: {state.next_attempt.isoformat()}')

@@ -88,8 +88,20 @@ def history_turn(account, kind, now=None):
     if kind == 'reviews' and Outgoing.objects.filter(thread__account=account, status__in=['Queued','Sending','Sent']).exists(): return False
     model = SalesSyncState if kind == 'sales' else SyncState
     current = model.objects.filter(account=account).first()
-    if kind == 'sales' and current and current.cursor: return False
+    if kind == 'sales' and current and current.cursor and not sales_retry_allows_history(account, current, now): return False
     return bool(current and current.coverage_until)
+
+
+def sales_retry_allows_history(account, current, now=None):
+    """A blocked current page must not prevent independent historical recovery.
+
+    Both readers retain their own leases and still share the adapter API budget.
+    WB keeps its single statistics stream; only Market can use independent lanes.
+    """
+    now = now or timezone.now()
+    return bool(account.platform == 'ym' and current and current.cursor and
+        current.next_attempt > now+timedelta(minutes=5) and
+        (not current.lease_until or current.lease_until <= now))
 
 
 def merge_current_coverage(account, kind, since, until):
@@ -224,9 +236,10 @@ def sales_history_page(account,state,cursor):
     if account.platform=='ym':
         from .ym_sales import load_page
         count,next_cursor,complete=load_page(account,state,cursor)
-        if complete: finish(account,state,cursor,source_time(cursor['until']))
+        if complete: finish(account,state,next_cursor,source_time(next_cursor['until']))
         else:
-            HistorySyncState.objects.filter(pk=state.pk,lease_token=state.lease_token).update(cursor=next_cursor,next_attempt=timezone.now()+timedelta(seconds=61),status=f'История продаж Маркета {cursor["days"]} дней: обработано {count}; обход продолжается.')
+            from .ym_scan import progress
+            HistorySyncState.objects.filter(pk=state.pk,lease_token=state.lease_token).update(cursor=next_cursor,next_attempt=timezone.now()+timedelta(seconds=61),status=f'История продаж Маркета {cursor["days"]} дней: событий {count}; {progress(next_cursor)}; обход продолжается.'[:240])
         return count
     since=source_time(cursor['since'])
     page_from=source_time(cursor.get('page_from',cursor['since']))
@@ -281,8 +294,8 @@ def sync_history(account,kind):
     except (IntegrationError,ValueError,TypeError,KeyError) as error:
         delay=error.retry_after or (120 if error.retryable else 3600) if isinstance(error,IntegrationError) else 3600
         message=str(error) if isinstance(error,IntegrationError) else 'Неожиданный формат исторических данных; полнота не подтверждена.'
-        if kind=='sales' and ('HTTP 401' in message or 'HTTP 403' in message):
-            message=('Нет доступа к истории продаж WB. Проверьте ключ с правами «Статистика».' if account.platform=='wb' else 'Нет доступа к истории продаж Маркета. Проверьте права чтения заказов и статистики.')
+        if kind=='sales' and account.platform=='wb' and ('HTTP 401' in message or 'HTTP 403' in message):
+            message='Нет доступа к истории продаж WB. Проверьте ключ с правами «Статистика».'
         HistorySyncState.objects.filter(pk=state.pk,lease_token=lease).update(next_attempt=timezone.now()+timedelta(seconds=delay),status=message[:240])
         if isinstance(error,IntegrationError): raise
         raise IntegrationError(message) from error

@@ -35,11 +35,20 @@ class MarketSalesCase(DeskCase):
         row.update(extras);return row
 
     def stats(self,number=1,status='DELIVERED',**extras):
-        return {'id':number,'status':status,'statusUpdateDate':(self.now-timedelta(days=1)).isoformat(),'fake':False,**extras}
+        return {'id':number,'creationDate':timezone.localdate(self.now-timedelta(days=3)).isoformat(),
+                'status':status,'statusUpdateDate':(self.now-timedelta(days=1)).isoformat(),'fake':False,**extras}
+
+    def campaigns(self):
+        return {'campaigns':[{'id':10,'business':{'id':int(self.ym.business_id)}}]}
+
+    def empty_response(self,method,path,**kwargs):
+        if path=='/v2/campaigns': return self.campaigns()
+        if path.endswith('/stats/orders'): return {'status':'OK','result':{'orders':[]}}
+        raise AssertionError('Unexpected request: '+path)
 
     def responses(self,orders,stats,token=None):
-        return [{'orders':orders,**({'paging':{'nextPageToken':token}}if token else{})},
-                {'status':'OK','result':{'orders':stats}}]
+        return [self.campaigns(), {'status':'OK','result':{'orders':stats,
+                    **({'paging':{'nextPageToken':token}}if token else{})}}, {'orders':orders}]
 
     def due(self,kind='current'):
         self.now+=timedelta(seconds=62)
@@ -142,7 +151,7 @@ class MarketSalesPollingTests(MarketSalesCase):
     @patch.object(YandexSales,'request')
     def test_diagnostic_reads_without_import_or_moving_a_cursor(self,request):
         call_command('diagnose_ym_sales',account=self.ym.name,stdout=StringIO());request.assert_not_called()
-        request.side_effect=self.responses([self.order()],[self.stats()])
+        request.side_effect=[{'orders':[self.order()]},{'status':'OK','result':{'orders':[self.stats()]}}]
         output=StringIO();call_command('diagnose_ym_sales',account=self.ym.name,probe=True,stdout=output)
         self.assertIn('статистики доступен',output.getvalue())
         self.assertEqual(request.call_count,2)
@@ -162,19 +171,21 @@ class MarketSalesPollingTests(MarketSalesCase):
     def test_business_api_and_stats_ids_and_completed_coverage(self,request):
         request.side_effect=self.responses([self.order()],[self.stats()])
         self.assertEqual(sync_ym_sales(self.ym),3)
-        self.assertEqual(request.call_args_list[0].args[1],'/v1/businesses/123/orders')
-        self.assertFalse(request.call_args_list[0].kwargs['json']['fake'])
+        self.assertEqual(request.call_args_list[0].args[1],'/v2/campaigns')
         self.assertEqual(request.call_args_list[1].args[1],'/v2/campaigns/10/stats/orders')
-        self.assertEqual(request.call_args_list[1].kwargs['json'],{'orders':[1]})
+        self.assertIn('updateFrom',request.call_args_list[1].kwargs['json'])
+        body=request.call_args_list[2].kwargs['json']
+        self.assertFalse(body['fake']);self.assertEqual(body['orderIds'],[1])
+        self.assertEqual(body['dates']['creationDateFrom'],self.stats()['creationDate'])
         state=SalesSyncState.objects.get();self.assertFalse(state.cursor)
-        self.assertEqual(state.coverage_until,self.now);self.assertIsNone(state.lease_token)
+        self.assertEqual(state.coverage_until,self.now-timedelta(minutes=45));self.assertIsNone(state.lease_token)
 
-    @patch.object(YandexSales,'request',return_value={'orders':[]})
+    @patch.object(YandexSales,'request')
     def test_incremental_market_poll_uses_six_hour_overlap_without_losing_completed_history(self,request):
-        self.coverage(90)
+        self.coverage(90);request.side_effect=self.empty_response
         sync_ym_sales(self.ym)
-        dates=request.call_args.kwargs['json']['dates']
-        self.assertEqual(timezone.datetime.fromisoformat(dates['updateDateFrom']),self.now-timedelta(hours=6))
+        dates=request.call_args.kwargs['json']
+        self.assertEqual(dates['updateFrom'],timezone.localdate(self.now-timedelta(hours=6)).isoformat())
         self.assertEqual(SalesSyncState.objects.get().coverage_since,self.now-timedelta(days=90))
 
     @patch.object(YandexSales,'request')
@@ -185,7 +196,7 @@ class MarketSalesPollingTests(MarketSalesCase):
         self.due();request.side_effect=IntegrationError('420',retry_after=300,retryable=True)
         with self.assertRaises(IntegrationError):sync_ym_sales(self.ym)
         state.refresh_from_db();self.assertEqual(state.cursor,cursor)
-        self.due();request.side_effect=[{'orders':[]}]
+        self.due();request.side_effect=[{'status':'OK','result':{'orders':[]}}]
         sync_ym_sales(self.ym);state.refresh_from_db()
         self.assertEqual(state.coverage_until,timezone.datetime.fromisoformat(cursor['until']))
         self.assertEqual(request.call_args.kwargs['params']['page_token'],'next')
@@ -200,19 +211,20 @@ class MarketSalesPollingTests(MarketSalesCase):
 
     @patch.object(YandexSales,'request')
     def test_missing_stats_never_marks_period_complete(self,request):
-        request.side_effect=self.responses([self.order()],[])
+        request.side_effect=self.responses([], [self.stats()])
         with self.assertRaises(IntegrationError):sync_ym_sales(self.ym)
         self.assertIsNone(SalesSyncState.objects.get().coverage_until)
 
     @patch.object(YandexSales,'request')
     def test_repeated_token_and_lost_lease_do_not_advance(self,request):
-        state=SalesSyncState.objects.create(account=self.ym,cursor={'ym_version':1,'since':(self.now-timedelta(days=7)).isoformat(),'until':self.now.isoformat(),'page_token':'same'})
-        request.return_value={'orders':[self.order()],'paging':{'nextPageToken':'same'}}
+        state=SalesSyncState.objects.create(account=self.ym,cursor={'ym_version':2,'campaigns_complete':True,'campaigns':['10'],'campaign_index':0,
+            'since':(self.now-timedelta(days=7)).isoformat(),'until':(self.now-timedelta(minutes=45)).isoformat(),'page_token':'same'})
+        request.return_value={'status':'OK','result':{'orders':[self.stats()],'paging':{'nextPageToken':'same'}}}
         with self.assertRaises(IntegrationError):sync_ym_sales(self.ym)
         self.assertFalse(SaleEvent.objects.exists())
         self.due()
         def response(*args,**kwargs):
-            SalesSyncState.objects.filter(pk=state.pk).update(lease_token=uuid.uuid4());return {'orders':[]}
+            SalesSyncState.objects.filter(pk=state.pk).update(lease_token=uuid.uuid4());return {'status':'OK','result':{'orders':[]}}
         request.side_effect=response
         with self.assertRaises(IntegrationError):sync_ym_sales(self.ym)
         state.refresh_from_db();self.assertIsNone(state.coverage_until)
@@ -227,21 +239,22 @@ class MarketSalesPollingTests(MarketSalesCase):
         with self.assertRaises(IntegrationError):sync_ym_sales(self.ym)
         request.assert_not_called()
 
-    @patch.object(YandexSales,'request',return_value={'orders':[]})
+    @patch.object(YandexSales,'request')
     def test_history_splits_90_days_into_at_most_30_day_slices(self,request):
-        self.coverage(7)
+        self.coverage(7);request.side_effect=self.empty_response
         state=HistorySyncState.objects.create(account=self.ym,kind='sales',cursor={'since':(self.now-timedelta(days=90)).isoformat(),'until':self.now.isoformat(),'days':90})
-        for _ in range(3):sync_history(self.ym,'sales');self.due('history')
+        for _ in range(4):sync_history(self.ym,'sales');self.due('history')
         state.refresh_from_db();self.assertFalse(state.cursor);self.assertEqual(state.days,90)
-        self.assertEqual(request.call_count,3)
-        for call in request.call_args_list:
-            dates=call.kwargs['json']['dates']
-            self.assertLessEqual(timezone.datetime.fromisoformat(dates['updateDateTo'])-timezone.datetime.fromisoformat(dates['updateDateFrom']),timedelta(days=30))
+        self.assertEqual(request.call_count,5)
+        for call in request.call_args_list[1:]:
+            dates=call.kwargs['json']
+            self.assertLessEqual(timezone.datetime.fromisoformat(dates['updateTo'])-timezone.datetime.fromisoformat(dates['updateFrom']),timedelta(days=29))
 
-    @patch.object(YandexSales,'request',return_value={'orders':[]})
+    @patch.object(YandexSales,'request')
     def test_history_expands_14_then_30_for_rare_product(self,request):
-        self.coverage(7)
+        self.coverage(7);request.side_effect=self.empty_response
         sync_history(self.ym,'sales');self.assertEqual(HistorySyncState.objects.get().days,14)
+        self.due('history');sync_history(self.ym,'sales')
         self.due('history');sync_history(self.ym,'sales');self.assertEqual(HistorySyncState.objects.get().days,30)
 
     @patch('desk.integrations.base.requests.request')

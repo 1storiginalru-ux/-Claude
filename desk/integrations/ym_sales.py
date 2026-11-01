@@ -1,7 +1,6 @@
 """Read-only Market order snapshots and versioned, per-unit sale events."""
 import copy
 import uuid
-from collections import defaultdict
 from datetime import timedelta
 from django.db import transaction
 from django.db.models import Q
@@ -13,8 +12,8 @@ from .rate_limit import acquire, observe
 from .wb_sales import source_time, store_sales
 from .yandex import YandexMarket
 from .window import sales_window_start
+from .ym_scan import VERSION, STATS_LAG, progress
 
-VERSION = 1
 FINAL = {'DELIVERED', 'PARTIALLY_RETURNED', 'RETURNED'}
 KNOWN = FINAL | {'PLACING','RESERVED','UNPAID','PROCESSING','DELIVERY','PICKUP','CANCELLED','PENDING'}
 UNIT_STATUSES = {'CREATED','SHIPPED','CANCELLED','DELIVERED_TO_BUYER','LOST','REJECTED','RETURNED'}
@@ -163,65 +162,8 @@ def save_order(account, plan):
 
 
 def load_page(account, state, cursor):
-    """One paged updated-order slice (at most 30 days), enriched by order IDs."""
-    adapter=YandexSales(account)
-    since,until=source_time(cursor['since']),source_time(cursor['until'])
-    start=source_time(cursor.get('slice_from')) or since
-    end=min(start+timedelta(days=30),until)
-    if not since<=start<end<=until: raise IntegrationError('Некорректный интервал страницы продаж Маркета.')
-    body={'fake':False,'dates':{'updateDateFrom':start.isoformat(),'updateDateTo':end.isoformat()}}
-    params={'limit':50}
-    if cursor.get('page_token'): params['page_token']=cursor['page_token']
-    def heartbeat():
-        if not type(state).objects.filter(pk=state.pk,lease_token=state.lease_token).update(lease_until=timezone.now()+timedelta(minutes=5)):
-            raise IntegrationError('Загрузка продаж Маркета передана другому процессу.',request_sent=False)
-    heartbeat()
-    payload=adapter.request('POST',adapter.path('orders',1),json=body,params=params)
-    rows=payload.get('orders') if isinstance(payload,dict) else None
-    paging=payload.get('paging') if isinstance(payload,dict) else None
-    if not isinstance(rows,list) or len(rows)>50 or (paging is not None and not isinstance(paging,dict)):
-        raise IntegrationError('Неожиданный формат страницы заказов Маркета.')
-    token=(paging or {}).get('nextPageToken')
-    if token and (not isinstance(token,str) or token==cursor.get('page_token') or not rows):
-        raise IntegrationError('Маркет повторил позицию страницы заказов.')
-    now=timezone.now();groups=defaultdict(list);selected=[];seen=set()
-    for row in rows:
-        campaign,order,created,changed,status=order_header(row,now)
-        if (campaign,order) in seen: raise IntegrationError('Повторный заказ в странице Маркета.')
-        seen.add((campaign,order))
-        if not start<=changed<=end: continue
-        selected.append(row)
-        if not row['fake'] and (status in FINAL or any(isinstance(i,dict) and any(isinstance(s,dict) and s.get('status') in {'DELIVERED_TO_BUYER','RETURNED'} for s in (i.get('itemStatuses') or [])) for i in row['items'])):
-            groups[campaign].append(order)
-    stats={}
-    for campaign,orders in groups.items():
-        heartbeat()
-        data=adapter.request('POST',f'/v2/campaigns/{campaign}/stats/orders',json={'orders':[int(i) for i in orders]},params={'limit':200})
-        result=data.get('result') if isinstance(data,dict) else None
-        entries=result.get('orders') if isinstance(result,dict) else None
-        if not isinstance(entries,list): raise IntegrationError('Неожиданный формат статистики заказов Маркета.')
-        stats_paging=result.get('paging')
-        if stats_paging is not None and not isinstance(stats_paging,dict): raise IntegrationError('Некорректная позиция страницы статистики Маркета.')
-        if (stats_paging or {}).get('nextPageToken'):
-            raise IntegrationError('Статистика вернула неполный набор выбранных заказов; полнота не подтверждена.')
-        for entry in entries:
-            if not isinstance(entry,dict): raise IntegrationError('Некорректная статистика заказа Маркета.')
-            oid=identifier(entry.get('id'))
-            if oid not in orders or (campaign,oid) in stats: raise IntegrationError('Статистика вернула посторонний или повторный заказ.')
-            stats[campaign,oid]=entry
-    plans=[plan_order(row,stats.get((identifier(row['campaignId']),identifier(row['orderId']))),now) for row in selected]
-    next_cursor=dict(cursor)
-    if token: next_cursor['page_token']=token
-    else:
-        next_cursor.pop('page_token',None)
-        next_cursor['slice_from']=end.isoformat()
-    complete=not token and end==until
-    with transaction.atomic():
-        Account.objects.select_for_update().get(pk=account.pk)
-        if not type(state).objects.select_for_update().filter(pk=state.pk,lease_token=state.lease_token).exists():
-            raise IntegrationError('Загрузка продаж Маркета передана другому процессу.')
-        count=sum(save_order(account,plan) for plan in plans)
-    return count,next_cursor,complete
+    from .ym_scan import scan_page
+    return scan_page(account, state, cursor)
 
 
 def sync_ym_sales(account):
@@ -238,15 +180,15 @@ def sync_ym_sales(account):
         cursor=state.cursor if isinstance(state.cursor,dict) else {}
         since,until=source_time(cursor.get('since')),source_time(cursor.get('until'))
         if cursor.get('ym_version')!=VERSION or not since or not until or not now-timedelta(days=8)<=since<until<=now:
-            cursor={'ym_version':VERSION,'since':sales_window_start(state, now).isoformat(),'until':now.isoformat()}
+            cursor={'ym_version':VERSION,'since':sales_window_start(state, now).isoformat(),'until':(now-STATS_LAG).isoformat()}
         count,next_cursor,complete=load_page(account,state,cursor)
         if complete:
-            record_coverage(state,source_time(cursor['since']),source_time(cursor['until']))
+            record_coverage(state,source_time(next_cursor['since']),source_time(next_cursor['until']))
             pending=YandexOrderState.objects.filter(account=account).exclude(issues=[]).count()
             status=f'Маркет: опрос периода завершён. Заказов с неподтверждёнными данными: {pending}.'
             SalesSyncState.objects.filter(pk=state.pk,lease_token=lease).update(cursor={},last_sync=timezone.now(),next_attempt=timezone.now()+timedelta(minutes=30),status=status)
         else:
-            SalesSyncState.objects.filter(pk=state.pk,lease_token=lease).update(cursor=next_cursor,next_attempt=timezone.now()+timedelta(seconds=61),status=f'Маркет: обработано событий {count}; загрузка продолжается.')
+            SalesSyncState.objects.filter(pk=state.pk,lease_token=lease).update(cursor=next_cursor,next_attempt=timezone.now()+timedelta(seconds=61),status=f'Маркет: событий {count}; {progress(next_cursor)}; загрузка продолжается.'[:240])
         return count
     except IntegrationError as error:
         SalesSyncState.objects.filter(pk=state.pk,lease_token=lease).update(cursor=cursor,next_attempt=timezone.now()+timedelta(seconds=error.retry_after or (120 if error.retryable else 3600)),status=str(error)[:240])
