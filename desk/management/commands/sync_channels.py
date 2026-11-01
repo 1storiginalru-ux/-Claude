@@ -48,9 +48,9 @@ class Command(BaseCommand):
                         for kind in ['sales', 'reviews']:
                             if kind == 'sales':
                                 from desk.models import SalesSyncState
-                                from desk.integrations.history import sales_retry_allows_history
+                                from desk.integrations.history import sales_history_allowed
                                 current = SalesSyncState.objects.filter(account=account).first()
-                                if current and current.cursor and not sales_retry_allows_history(account,current): continue
+                                if not sales_history_allowed(account,current): continue
                             if kind == 'reviews' and Outgoing.objects.filter(thread__account=account,status__in=['Queued','Sending','Sent']).exists(): continue
                             try:
                                 count = sync_history(account, kind)

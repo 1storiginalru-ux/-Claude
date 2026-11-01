@@ -182,6 +182,7 @@ def sync_ym_sales(account):
         if cursor.get('ym_version')!=VERSION or not since or not until or not now-timedelta(days=8)<=since<until<=now:
             cursor={'ym_version':VERSION,'since':sales_window_start(state, now).isoformat(),'until':(now-STATS_LAG).isoformat()}
         count,next_cursor,complete=load_page(account,state,cursor)
+        next_cursor['page_completed_at'] = timezone.now().isoformat()
         if complete:
             record_coverage(state,source_time(next_cursor['since']),source_time(next_cursor['until']))
             pending=YandexOrderState.objects.filter(account=account).exclude(issues=[]).count()

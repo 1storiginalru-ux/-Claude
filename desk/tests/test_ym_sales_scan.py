@@ -1,16 +1,20 @@
 """Regression for real missing August orders and false 90-day certificates."""
 import copy
 import importlib
+import os
 from datetime import timedelta
+from io import StringIO
 from unittest.mock import patch
 from django.apps import apps
 from django.db import connection
 from django.utils import timezone
+from django.core.management import call_command
 from desk.integrations.base import IntegrationError
 from desk.integrations.ym_scan import STATS_LAG, scan_page
 from desk.integrations.ym_sales import YandexSales, sync_ym_sales
-from desk.models import AIJob, Audit, HistorySyncState, Outgoing, SaleEvent, SalesSyncState
-from desk.integrations.history import sales_retry_allows_history, sync_history
+from desk.models import AIJob, ApiThrottle, Audit, HistorySyncState, Outgoing, SaleEvent, SalesSyncState
+from desk.integrations.rate_limit import scope_for
+from desk.integrations.history import sales_history_allowed, history_turn, sync_history
 from .test_ym_sales import MarketSalesCase
 
 
@@ -102,9 +106,9 @@ class MarketSalesScanTests(MarketSalesCase):
     def test_primed_recovery_can_progress_while_a_current_shop_is_blocked(self,request):
         state=SalesSyncState.objects.create(account=self.ym,cursor={'partial':'keep'},
             next_attempt=self.now+timedelta(hours=1),status='Магазин: HTTP 403')
-        self.assertTrue(sales_retry_allows_history(self.ym,state))
+        self.assertTrue(sales_history_allowed(self.ym,state))
         state.next_attempt=self.now+timedelta(seconds=61)
-        self.assertFalse(sales_retry_allows_history(self.ym,state))
+        self.assertTrue(sales_history_allowed(self.ym,state))
         HistorySyncState.objects.create(account=self.ym,kind='sales',cursor={
             'since':(self.now-timedelta(days=90)).isoformat(),'until':(self.now-STATS_LAG).isoformat(),
             'days':90,'ym_version':2})
@@ -115,6 +119,83 @@ class MarketSalesScanTests(MarketSalesCase):
         self.assertEqual(sync_history(self.ym,'sales'),1)
         self.assertEqual(SaleEvent.objects.get().occurred_at,delivered)
         self.assertIsNone(SalesSyncState.objects.get().coverage_until)
+
+
+class MarketSalesSchedulingTests(MarketSalesCase):
+    def setUp(self):
+        super().setUp()
+        self.account.enabled=False;self.account.save()
+        self.current=SalesSyncState.objects.create(account=self.ym,cursor={'ym_version':2,'page_token':'unfinished-current'},
+            next_attempt=self.now-timedelta(seconds=1))
+        self.history=HistorySyncState.objects.create(account=self.ym,kind='sales',cursor={
+            'since':(self.now-timedelta(days=90)).isoformat(),'until':(self.now-STATS_LAG).isoformat(),
+            'days':90,'ym_version':2},next_attempt=self.now-timedelta(seconds=1))
+
+    def poll(self):
+        with patch('desk.management.commands.sync_channels.sync_account'), \
+                patch('desk.integrations.wb_sales.sync_wb_sales') as wb, \
+                patch('desk.integrations.ym_sales.sync_ym_sales',return_value=0) as current, \
+                patch('desk.integrations.history.sync_history',return_value=0) as history, \
+                patch('desk.incidents.service.recheck_products'):
+            call_command('sync_channels',stdout=StringIO(),stderr=StringIO())
+            return current,history,wb
+
+    def test_current_continuation_and_due_history_both_get_a_turn_before_any_coverage(self):
+        self.history.last_request_at=self.now-timedelta(minutes=1);self.history.save()
+        current,history,wb=self.poll()
+        current.assert_called_once();wb.assert_not_called()
+        self.assertTrue(any(c.args[0].pk==self.ym.pk and c.args[1]=='sales' for c in history.call_args_list))
+        self.current.refresh_from_db();self.history.refresh_from_db()
+        self.assertIsNone(self.current.coverage_until);self.assertIsNone(self.history.coverage_until)
+        self.assertEqual(self.current.cursor['page_token'],'unfinished-current')
+
+    def test_recent_history_request_does_not_suppress_current_reader(self):
+        self.current.coverage_since=self.now-timedelta(days=7);self.current.coverage_until=self.now;self.current.save()
+        self.history.last_request_at=self.now-timedelta(minutes=1);self.history.save()
+        self.assertFalse(history_turn(self.ym,'sales',self.now))
+        current,history,wb=self.poll()
+        current.assert_called_once()
+        self.assertTrue(any(c.args[1]=='sales' for c in history.call_args_list))
+
+    def test_primed_history_gets_a_reserved_turn_without_a_current_certificate(self):
+        self.assertTrue(history_turn(self.ym,'sales',self.now))
+        current,history,wb=self.poll()
+        current.assert_not_called()
+        self.assertTrue(any(c.args[1]=='sales' for c in history.call_args_list))
+
+    def test_scarce_slots_are_not_repeatedly_reserved_while_current_has_not_advanced(self):
+        self.history.last_request_at=self.now-timedelta(minutes=6);self.history.save()
+        self.current.cursor['page_completed_at']=(self.now-timedelta(minutes=7)).isoformat();self.current.save()
+        self.assertFalse(history_turn(self.ym,'sales',self.now))
+        current,history,wb=self.poll()
+        current.assert_called_once()
+        self.current.cursor['page_completed_at']=(self.now-timedelta(minutes=1)).isoformat();self.current.save()
+        self.assertTrue(history_turn(self.ym,'sales',self.now))
+
+    def test_live_current_lease_defers_history_without_modifying_retry_deadlines(self):
+        self.current.lease_until=self.now+timedelta(minutes=5);self.current.save()
+        current,history,wb=self.poll()
+        self.assertFalse(any(c.args[1]=='sales' for c in history.call_args_list))
+        self.current.refresh_from_db()
+        self.assertEqual(self.current.next_attempt,self.now-timedelta(seconds=1))
+
+    def test_wb_unfinished_stream_remains_exclusive_even_after_a_long_pause(self):
+        wb=SalesSyncState.objects.create(account=self.account,cursor={'page_from':'pending'},
+            next_attempt=self.now+timedelta(hours=2))
+        self.assertFalse(sales_history_allowed(self.account,wb,self.now))
+
+    @patch('desk.integrations.base.requests.request')
+    @patch.dict(os.environ,{'TEST_YM_TOKEN':'fairness-test-only'})
+    def test_a_shared_api_pause_still_blocks_the_historical_http_request(self,request):
+        deadline=self.now+timedelta(minutes=10)
+        ApiThrottle.objects.create(scope=scope_for('fairness-test-only','ym-sales'),next_request_at=deadline)
+        self.current.next_attempt=deadline;self.current.save()
+        self.assertTrue(sales_history_allowed(self.ym,self.current,self.now))
+        with self.assertRaises(IntegrationError):sync_history(self.ym,'sales')
+        request.assert_not_called()
+        self.history.refresh_from_db();self.current.refresh_from_db()
+        self.assertGreaterEqual(self.history.next_attempt,deadline)
+        self.assertEqual(self.current.next_attempt,deadline)
 
 
 class MarketCoverageMigrationTests(MarketSalesCase):

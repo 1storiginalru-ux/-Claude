@@ -88,20 +88,29 @@ def history_turn(account, kind, now=None):
     if kind == 'reviews' and Outgoing.objects.filter(thread__account=account, status__in=['Queued','Sending','Sent']).exists(): return False
     model = SalesSyncState if kind == 'sales' else SyncState
     current = model.objects.filter(account=account).first()
-    if kind == 'sales' and current and current.cursor and not sales_retry_allows_history(account, current, now): return False
+    if kind == 'sales' and account.platform == 'ym':
+        # An occasional reserved turn also prevents starvation when the API
+        # budget only admits one reader. Primed recovery does not need a
+        # completed current certificate; the last_request_at guard bounds this
+        # reservation to once per five minutes of successful history requests.
+        if state.last_request_at and current and current.cursor:
+            last_current_page = source_time(current.cursor.get('page_completed_at')) or current.last_sync
+            if not last_current_page or last_current_page <= state.last_request_at:
+                return False
+        return bool(state.cursor or current and current.coverage_until) and sales_history_allowed(account,current,now)
+    if kind == 'sales' and not sales_history_allowed(account, current, now): return False
     return bool(current and current.coverage_until)
 
 
-def sales_retry_allows_history(account, current, now=None):
-    """A blocked current page must not prevent independent historical recovery.
+def sales_history_allowed(account, current, now=None):
+    """Allow a Market history page after the current reader releases its lease.
 
-    Both readers retain their own leases and still share the adapter API budget.
-    WB keeps its single statistics stream; only Market can use independent lanes.
+    Its cursor records continuation, not an active transaction. API limits still
+    apply to both lanes. WB must finish its shared statistics stream first.
     """
     now = now or timezone.now()
-    return bool(account.platform == 'ym' and current and current.cursor and
-        current.next_attempt > now+timedelta(minutes=5) and
-        (not current.lease_until or current.lease_until <= now))
+    if account.platform != 'ym': return not current or not current.cursor
+    return not current or not current.lease_until or current.lease_until <= now
 
 
 def merge_current_coverage(account, kind, since, until):
