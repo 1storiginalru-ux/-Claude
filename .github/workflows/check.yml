@@ -84,3 +84,4 @@ jobs:
           desk.tests.test_automatic_backfill
           desk.tests.test_rating_analysis
           desk.tests.test_auto_reply_recovery
+          desk.tests.test_https_setup
