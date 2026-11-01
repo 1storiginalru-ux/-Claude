@@ -6,12 +6,49 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.http import Http404
 from django.utils import timezone
+from django.core.paginator import Paginator
+from django.views.decorators.http import require_GET
 from desk.access import companies_for
 from desk.forms import TopicRuleForm
 from desk.models import Account, ControlDefaults, ControlTopicRule, Membership
 from desk.voc.profile import save_rule
 from desk.voc.rules import signal_label
 from desk.voc.topics import CONTROL_SIGNALS, starter_profile
+
+
+@login_required
+@require_GET
+def control_data(request):
+    from desk.voc.data_quality import CAUSES, control_data_report
+    accounts = Account.objects.filter(company__in=companies_for(request.user), company__is_demo=False,
+        platform__in=['wb', 'ym']).select_related('company').order_by('name')
+    selected = request.GET.get('account', '')
+    if selected:
+        if not selected.isdigit():
+            raise Http404()
+        account = get_object_or_404(accounts, pk=int(selected))
+        selected_accounts = [account]
+    else:
+        selected_accounts = list(accounts)
+    report = control_data_report(selected_accounts)
+    mode = request.GET.get('filter', 'priority')
+    cause = request.GET.get('cause', '')
+    if mode not in {'priority', 'incomplete', 'ready', 'inactive', 'all'} or cause and cause not in CAUSES:
+        raise Http404()
+    rows = report['items']
+    if mode == 'priority': rows = [r for r in rows if r['priority'] <= 1 and not r['ready']]
+    elif mode == 'incomplete': rows = [r for r in rows if r['activity'] and not r['ready']]
+    elif mode == 'ready': rows = [r for r in rows if r['ready']]
+    elif mode == 'inactive': rows = [r for r in rows if not r['activity']]
+    if cause: rows = [r for r in rows if cause in r['causes']]
+    query = request.GET.get('q', '').strip().casefold()
+    if query: rows = [r for r in rows if query in r['code'].casefold() or query in r['name'].casefold()]
+    page = Paginator(rows, 25).get_page(request.GET.get('page'))
+    for row in page:
+        row['details'] = [{'label': CAUSES[c][0], 'action': CAUSES[c][1]} for c in row['causes']]
+    return render(request, 'desk/control_data.html', {'companies': companies_for(request.user),
+        'now': report['generated_at'], 'report': report, 'accounts': accounts, 'selected_account': selected,
+        'data_filter': mode, 'data_cause': cause, 'data_page': page})
 
 
 @login_required

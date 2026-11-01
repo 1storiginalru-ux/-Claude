@@ -27,17 +27,23 @@ def eligible(account, kind):
             and ProductMapping.objects.filter(account=account).exists())
 
 
-def planning_dataset(account, now):
+def planning_dataset(account, now, account_only=False):
     from desk.voc.dataset import ControlDataset
     codes = ProductMapping.objects.filter(account=account).values('product__code')
     ids = Product.objects.filter(code__in=codes, company__is_demo=False).values('code').annotate(pk_first=Min('pk')).values_list('pk_first', flat=True)
     products = list(Product.objects.filter(pk__in=ids))
-    return products, ControlDataset(products, Company.objects.filter(is_demo=False), now=now, include_reviews=False)
+    companies = Company.objects.filter(pk=account.company_id) if account_only else Company.objects.filter(is_demo=False)
+    return products, ControlDataset(products, companies, now=now, include_reviews=False,
+                                   account_ids=[account.pk] if account_only else None)
 
 
 def history_need(account, kind, state, now):
-    products, data = planning_dataset(account, now)
-    periods = [data.period(p.code) for p in products]
+    products, data = planning_dataset(account, now, account_only=kind=='sales')
+    periods = [data.period(p.code, account_id=account.pk if kind=='sales' else None) for p in products]
+    if kind == 'reviews':
+        # Both the combined control and the cabinet's own 100-sale window need
+        # archive coverage; the latter may start earlier than the combined one.
+        periods += [data.period(p.code, account_id=account.pk) for p in products]
     recent = SalesSyncState.objects.filter(account=account).first() if kind == 'sales' else SyncState.objects.filter(account=account).first()
     if kind == 'sales':
         # Complete the first current report before widening the shared statistics stream.

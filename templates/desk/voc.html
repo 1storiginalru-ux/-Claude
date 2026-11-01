@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 {% block breadcrumb %}Voice of Customer · Контроль товаров{% endblock %}
-{% block content %}<p><a class="button small" href="{% url 'control_rules' %}">Пороги по кабинетам</a></p>
+{% block content %}<p><a class="button small" href="{% url 'control_rules' %}">Пороги по кабинетам</a> <a class="button small" href="{% url 'control_data' %}">Полнота данных и продажи</a></p>
 <div class="page-heading"><div><div class="eyebrow">КАЧЕСТВО ТОВАРА · ОТ СИГНАЛА К ДЕЙСТВИЮ</div><h1>Контроль товаров</h1><p>Общие показатели по доступным кабинетам. Сначала — товары, требующие проверки.</p></div><a class="button" href="{% url 'products' %}">Каталог товаров ↗</a></div>
 <div class="stats-grid">
 <a href="{% querystring filter='attention' page=1 %}" class="stat-card"><span>Требуют внимания</span><strong>{{ totals.attention }}</strong><small>Сигналы и открытые расследования</small></a>

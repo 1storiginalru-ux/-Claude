@@ -71,35 +71,46 @@ def calculate_window(window, now, api_accounts, all_accounts, manual_accounts, s
             if total >= target:
                 break
         start_at = timezone.make_aware(datetime.combine(start_day, time.min)) if start_day else None
-    reasons = []
+    reasons, issues = [], []
+    if not all_accounts:
+        issues.append({'code': 'mapping', 'account_id': None})
     if target and total < target:
         reasons.append(f'Накоплено {total} из {target} выкупов')
+        issues.append({'code': 'few_sales', 'account_id': None})
     manual_present = {row['account_id'] for row in daily}
     if manual_accounts - manual_present:
         reasons.append('Не для всех кабинетов загружены продажи')
+        issues.extend({'code': 'manual_sales', 'account_id': pk} for pk in sorted(manual_accounts - manual_present))
     freshness_reasons = []
     for account_id in api_accounts:
         state = sales_states.get(account_id)
         if (not state or not state.coverage_since or not state.coverage_until
                 or not start_at or state.coverage_since > start_at or (exact and state.coverage_until < until)):
             reasons.append('Не подтверждена полнота продаж API за окно')
-            break
+            issues.append({'code': 'sales_coverage', 'account_id': account_id})
     if any(s.coverage_until and s.coverage_until < now - timedelta(hours=3) for s in sales_states.values()):
         freshness_reasons.append('Последнее подтверждение продаж старше трёх часов; обновление продолжается')
+        issues.extend({'code': 'sales_stale', 'account_id': pk} for pk, s in sales_states.items()
+                      if s.coverage_until and s.coverage_until < now - timedelta(hours=3))
     from .uncertainty import overlaps
     ambiguous=any(overlaps(issue,start_at,until) for issue in uncertainties if issue['account_id'] in api_accounts)
     if ambiguous:
         reasons.append('Не подтверждены дата или количество выкупов Маркета за окно')
-    sales_reasons = list(reasons)
+        issues.extend({'code': 'sale_date_quantity', 'account_id': pk} for pk in sorted({
+            issue['account_id'] for issue in uncertainties if issue['account_id'] in api_accounts and overlaps(issue,start_at,until)}))
+    sales_reasons = list(dict.fromkeys(reasons))
     feedback_reasons = []
     for account_id in all_accounts:
         state = feedback_states.get(account_id)
         if (not state or not state.coverage_since or not state.coverage_until or not start_at
                 or state.coverage_since > start_at or (exact and state.coverage_until < until)):
             feedback_reasons.append('Не подтверждена полнота отзывов за окно')
-            break
+            issues.append({'code': 'reviews_coverage', 'account_id': account_id})
     if any(s.coverage_until and s.coverage_until < now - timedelta(hours=3) for s in feedback_states.values()):
         freshness_reasons.append('Последнее подтверждение отзывов старше трёх часов; обновление продолжается')
+        issues.extend({'code': 'reviews_stale', 'account_id': pk} for pk, s in feedback_states.items()
+                      if s.coverage_until and s.coverage_until < now - timedelta(hours=3))
+    feedback_reasons = list(dict.fromkeys(feedback_reasons))
     reasons.extend(feedback_reasons)
     coverage_complete = bool(all_accounts) and not reasons
     reasons.extend(freshness_reasons)
@@ -108,4 +119,5 @@ def calculate_window(window, now, api_accounts, all_accounts, manual_accounts, s
             'target': target, 'reasons': list(dict.fromkeys(reasons)), 'complete': bool(all_accounts) and not reasons,
             'has_api': bool(api_accounts), 'accounts': all_accounts,
             'sales_reasons': sales_reasons, 'feedback_reasons': feedback_reasons,'window_ambiguous':ambiguous,
-            'coverage_complete': coverage_complete, 'freshness_reasons': freshness_reasons}
+            'coverage_complete': coverage_complete, 'freshness_reasons': freshness_reasons,
+            'issues': sorted(issues, key=lambda i: (i['code'], i['account_id'] or 0))}

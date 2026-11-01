@@ -109,14 +109,16 @@ class AdaptiveSalesTests(HistoryCase):
         self.assertNotIn('nmId',request.call_args.kwargs['params'])
         self.assertEqual(SaleEvent.objects.count(),100)
 
-    @patch.object(WBSales,'request')
-    def test_accounts_merge_to_100_not_a_quota_of_100_each(self,request):
+    @patch.object(WBSales,'request',return_value=[])
+    def test_aggregate_100_does_not_hide_missing_history_for_an_individual_cabinet(self,request):
         self.prime_sales(30,2)
         ProductMapping.objects.create(account=self.ym,product=self.product,sku='ym-product')
         SalesDaily.objects.create(account=self.ym,sku='ym-product',date=timezone.localdate(self.now),redemptions=70)
         SyncState.objects.create(account=self.ym,coverage_since=self.now-timedelta(days=7),coverage_until=self.now)
-        sync_history(self.account,'sales');request.assert_not_called()
-        self.assertIn('100 выкупов доступны',HistorySyncState.objects.get(kind='sales').status)
+        sync_history(self.account,'sales')
+        request.assert_called_once()
+        self.assertEqual(HistorySyncState.objects.get(kind='sales').days,14)
+        self.assertEqual(SaleEvent.objects.filter(account=self.account).count(),30)
 
     @patch.object(WBSales,'request')
     def test_waits_for_initial_current_report_and_does_not_reset_its_cursor(self,request):
@@ -172,6 +174,16 @@ class AdaptiveSalesTests(HistoryCase):
 
 
 class HistoricalReviewTests(HistoryCase):
+    @patch.object(Wildberries,'request',return_value={'data':{'feedbacks':[]}})
+    def test_cabinet_archive_covers_its_own_window_even_when_combined_sales_are_newer(self,request):
+        self.prime_sales(100,20)
+        SalesSyncState.objects.update(coverage_since=self.now-timedelta(days=30))
+        ProductMapping.objects.create(account=self.ym,product=self.product,sku='ym-product')
+        SalesDaily.objects.create(account=self.ym,sku='ym-product',date=timezone.localdate(self.now),redemptions=100)
+        SyncState.objects.create(account=self.ym,coverage_since=self.now-timedelta(days=30),coverage_until=self.now)
+        sync_history(self.account,'reviews')
+        self.assertLessEqual(request.call_args.kwargs['params']['dateFrom'],int((self.now-timedelta(days=20)).timestamp()))
+
     def test_disabling_history_never_turns_missing_archive_into_verified_feedback(self):
         self.account.history_enabled=False;self.account.save()
         state=feedback_coverage([self.account.pk])[self.account.pk]

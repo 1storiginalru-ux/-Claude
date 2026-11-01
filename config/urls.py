@@ -24,6 +24,7 @@ urlpatterns = [
     path('products/<int:pk>/rules/', views.product_rules, name='product_rules'),
     path('voc/', views.voc, name='voc'),
     path('voc/rules/', control_views.control_rules, name='control_rules'),
+    path('voc/data/', control_views.control_data, name='control_data'),
     path('imports/', views.imports, name='imports'),
     path('integrations/', views.integrations, name='integrations'),
     path('tone/', views.tone, name='tone'),

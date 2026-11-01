@@ -8,13 +8,15 @@ from .windows import calculate_window
 
 
 class ControlDataset:
-    def __init__(self, products, companies, now=None, include_reviews=True):
+    def __init__(self, products, companies, now=None, include_reviews=True, account_ids=None):
         self.now = now or timezone.now()
         codes = [p.code for p in products]
         self.company_ids = set(companies.values_list('pk', flat=True))
         self.mappings, self.events, self.daily, self.threads = (defaultdict(list) for _ in range(4))
         self.baselines, self.periods = {}, {}
         mappings = ProductMapping.objects.filter(product__code__in=codes, product__company_id__in=self.company_ids).select_related('account', 'product')
+        if account_ids is not None:
+            mappings = mappings.filter(account_id__in=account_ids)
         accounts = set()
         for mapping in mappings:
             self.mappings[mapping.product.code].append(mapping)
@@ -29,6 +31,8 @@ class ControlDataset:
         for row in daily.annotate(product_code=F('account__productmapping__product__code')).values('account_id', 'sku', 'date', 'redemptions', 'product_code'):
             self.daily[row['product_code']].append(row)
         reviews = Thread.objects.filter(product__code__in=codes, account__company_id__in=self.company_ids, product__company_id__in=self.company_ids, kind='review', received_at__lte=self.now)
+        if account_ids is not None:
+            reviews = reviews.filter(account_id__in=account_ids)
         if include_reviews:
             for thread in reviews.select_related('analysis', 'assessment', 'product', 'account').defer('history_cursor', 'analysis__draft', 'analysis__summary', 'assessment__comment'):
                 self.threads[thread.product.code].append(thread)

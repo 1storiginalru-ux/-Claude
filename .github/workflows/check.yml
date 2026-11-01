@@ -86,3 +86,4 @@ jobs:
           desk.tests.test_auto_reply_recovery
           desk.tests.test_https_setup
           desk.tests.test_topic_control
+          desk.tests.test_control_data
