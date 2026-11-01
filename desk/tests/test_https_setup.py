@@ -60,6 +60,34 @@ class HttpsSetupTests(SimpleTestCase):
             self.assertEqual(setup.wait_for_response(DOMAIN,443,'/health/',tls=True),(200,[]))
             self.assertEqual(request.call_count,3);self.assertEqual(sleep.call_count,2)
 
+    def test_redirect_waits_until_old_bootstrap_workers_stop_serving_http(self):
+        with patch.object(setup,'local_request',side_effect=[(503,[]),(301,[('Location','https://'+DOMAIN+'/')])]) as request, \
+             patch.object(setup.time,'sleep') as sleep:
+            setup.wait_for_redirect(DOMAIN)
+            self.assertEqual(request.call_count,2);sleep.assert_called_once_with(.25)
+
+    def test_wrong_redirect_is_not_accepted_and_includes_observed_response(self):
+        with patch.object(setup,'local_request',return_value=(301,[('Location','http://other.example.ru/')])) as request, \
+             patch.object(setup.time,'sleep'):
+            with self.assertRaisesMessage(ValueError,'HTTP 301, Location=') as error:
+                setup.wait_for_redirect(DOMAIN)
+            self.assertIn('http://other.example.ru/',str(error.exception))
+            self.assertEqual(request.call_count,40)
+
+    def test_activation_recovers_from_transient_bootstrap_response_after_https_is_ready(self):
+        attempts=[]
+        def request(domain,port,path,**kwargs):
+            if port==80 and path=='/':
+                attempts.append(path)
+                if len(attempts)==1:return 503,[]
+            return self.request(domain,port,path,**kwargs)
+        with patch.object(setup.time,'sleep'):
+            self.activate(request=request)
+        self.assertEqual(len(attempts),2)
+        self.assertTrue(setup.LINK.is_symlink())
+        self.assertEqual(read_environment(setup.ENV)['VOC_HTTPS'],'1')
+        self.assertEqual(self.commands.count(('systemctl','restart','voice-web')),1)
+
     def test_environment_changes_only_https_keys_and_keeps_literal_secrets(self):
         content=setup.environment_bytes(DOMAIN)
         target=self.root/'result.env';setup.atomic_write(target,content,0o600)

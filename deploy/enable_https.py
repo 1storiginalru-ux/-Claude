@@ -197,6 +197,24 @@ def wait_for_web(domain):
     wait_for_response(domain, 8000, '/health/', forwarded=True)
 
 
+def wait_for_redirect(domain):
+    # Nginx starts the new TLS listener before old HTTP workers have finished
+    # their graceful shutdown. An immediate HTTP probe can still see bootstrap
+    # 503 even though HTTPS is already ready. Wait for the new HTTP route too.
+    status, locations = None, []
+    for attempt in range(40):
+        try:
+            status, headers = local_request(domain, 80, '/')
+            locations = [value for key, value in headers if key.lower() == 'location']
+            if status in {301, 308} and locations == ['https://' + domain + '/']:
+                return
+        except (OSError, http.client.HTTPException):
+            status, locations = None, []
+        time.sleep(.25)
+    observed = repr(locations)[:240]
+    raise ValueError(f'Не подтверждён переход HTTP → HTTPS: HTTP {status}, Location={observed}.')
+
+
 def preflight(domain, server_ip, hook):
     if os.geteuid() != 0:
         raise ValueError('Запустите настройку на сервере от root.')
@@ -293,9 +311,7 @@ def activate(domain, server_ip):
             if path == '/login/' and not any(k.lower() == 'set-cookie' and v.startswith('csrftoken=')
                                            and re.search(r'(?:^|;)\s*Secure(?:;|$)', v, re.I) for k, v in headers):
                 raise ValueError('Не подтверждена защищённая cookie формы входа.')
-        status, headers = local_request(domain, 80, '/')
-        if status not in {301, 308} or dict((k.lower(), v) for k, v in headers).get('location') != 'https://' + domain + '/':
-            raise ValueError('Не подтверждён переход HTTP → HTTPS.')
+        wait_for_redirect(domain)
         hook.parent.mkdir(parents=True, exist_ok=True)
         hook_text = ('#!/bin/sh\n' + MARKER + '; domain=' + domain + '\nset -eu\n'
                      'if [ "${RENEWED_LINEAGE:-}" = "' + str(LE / 'live' / domain) + '" ]; then\n'
