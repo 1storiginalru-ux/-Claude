@@ -48,6 +48,25 @@ class ControlDataTests(ReviewControlCase):
         self.assertIn('few_sales', row['causes']); self.assertFalse(row['ready'])
         self.assertIsNone(row['per100']); self.assertEqual(row['negative'], 1)
 
+    def test_zero_sales_is_an_undefined_window_not_two_claimed_api_failures(self):
+        self.analysis()
+        row = self.report()['items'][0]
+        self.assertIn('window_missing', row['causes'])
+        self.assertIn('few_sales', row['causes'])
+        self.assertNotIn('sales_coverage', row['causes'])
+        self.assertNotIn('reviews_coverage', row['causes'])
+        self.assertFalse(row['ready']); self.assertIsNone(row['per100'])
+        self.assertEqual(row['negative'], 1)
+
+    def test_unlinked_reviews_are_split_by_the_same_six_month_boundary(self):
+        self.make_thread('unmapped-recent', product=None)
+        self.make_thread('unmapped-old', product=None, received_at=self.now-timedelta(days=210))
+        self.make_thread('unmapped-future', product=None, received_at=self.now+timedelta(days=1))
+        report = self.report()
+        self.assertEqual(report['summary']['unmapped_reviews'], 2)
+        self.assertEqual(report['summary']['unmapped_recent_reviews'], 1)
+        self.assertEqual(report['accounts'][0]['unmapped_recent_reviews'], 1)
+
     def test_stale_sales_coverage_and_classification_are_separate_causes(self):
         self.events(); self.analysis(confidence=.2)
         self.thread.received_at=self.now-timedelta(hours=5); self.thread.save()

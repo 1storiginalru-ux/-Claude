@@ -27,11 +27,11 @@ class Command(BaseCommand):
         summary = report['summary']
         self.stdout.write(f'Товаров каталога: {summary["catalogue_products"]}; с отзывами за 6 мес.: {summary["products_with_reviews"]}; с учтённым негативом: {summary["negative_products"]}.')
         self.stdout.write(f'Пар товар/кабинет: {summary["pairs"]}; без сохранённой активности: {summary["no_activity_pairs"]}; готовы к расчёту: {summary["ready_pairs"]}; активных с неполными данными: {summary["incomplete_active_pairs"]}.')
-        self.stdout.write(f'Приоритет — пары с негативом и неполными данными: {summary["negative_incomplete_pairs"]}. Отзывов без ProductID: {summary["unmapped_reviews"]}.')
+        self.stdout.write(f'Приоритет — пары с негативом и неполными данными: {summary["negative_incomplete_pairs"]}. Отзывов без ProductID за 6 мес.: {summary["unmapped_recent_reviews"]}; за всё время: {summary["unmapped_reviews"]}.')
         for account in report['accounts']:
             storage, sales = account['storage'], account['sales']
             self.stdout.write(f'{account["name"]}: сохранено выкупов {storage["count"]}; последнее сохранение {storage["saved_at"]}; заказы с неопределённостью {account["uncertain_orders"]}.')
-            self.stdout.write(f'  Включён: {account["enabled"]}; продажи: {account["sales_enabled"]}; история: {account["history_enabled"]}; глубина {account["history_days"]} дн.; без ProductID: {account["unmapped_reviews"]}.')
+            self.stdout.write(f'  Включён: {account["enabled"]}; продажи: {account["sales_enabled"]}; история: {account["history_enabled"]}; глубина {account["history_days"]} дн.; без ProductID за 6 мес./всего: {account["unmapped_recent_reviews"]}/{account["unmapped_reviews"]}.')
             if sales:
                 self.stdout.write(f'  Подтверждено: {sales["coverage_since"]} — {sales["coverage_until"]}; продолжение: {sales["continuation"]}; следующая попытка: {sales["next_attempt"]}. {sales["status"]}')
             else:
