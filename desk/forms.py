@@ -6,7 +6,7 @@ from desk.voc.rules import PRODUCT_SIGNALS, signal_label
 class ReviewAssessmentForm(forms.Form):
     decision = forms.ChoiceField(label='Решение оператора', choices=ReviewAssessment.DECISIONS)
     signals = forms.MultipleChoiceField(label='Причины', required=False,
-        choices=[(s, signal_label(s)) for s in [*PRODUCT_SIGNALS, 'DELIVERY', 'SERVICE', 'CONTENT', 'PRICE', 'OTHER']],
+        choices=[(s, signal_label(s)) for s in PRODUCT_SIGNALS],
         widget=forms.CheckboxSelectMultiple)
     severity = forms.ChoiceField(label='Важность', choices=[('P0', 'P0 — срочно'), ('P1', 'P1 — высокая'), ('P2', 'P2 — обычная'), ('P3', 'P3 — низкая')], initial='P2')
     objective_issue = forms.BooleanField(label='Есть конкретная проблема, требующая проверки', required=False)
@@ -32,3 +32,7 @@ class NegativeRuleForm(forms.Form):
         if 'warning' in data and 'threshold' in data and data['warning'] >= data['threshold']:
             raise forms.ValidationError('Порог расследования должен быть выше порога предупреждения.')
         return data
+
+
+class TopicRuleForm(NegativeRuleForm):
+    cluster_enabled = forms.BooleanField(label='Проверять серии похожих жалоб', required=False, initial=True)

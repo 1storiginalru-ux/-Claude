@@ -2,9 +2,10 @@ from datetime import timedelta
 from django.utils import timezone
 from desk.models import Baseline, Thread
 from desk.reviews import effective_analysis
+from .topics import CONTROL_SIGNALS, SERIES_SIGNALS, PROCESS_SIGNALS
 
 SIGNALS = {'AUTH', 'AUTH-SCENT', 'AUTH-LONGEVITY', 'AUTH-MARKING', 'AUTH-PACK', 'AUTH-UNKNOWN', 'LONG', 'SCENT', 'PACK', 'DEFECT', 'MARK', 'DELIVERY', 'SERVICE', 'RETURN', 'CONTENT', 'PRICE', 'OTHER'}
-PRODUCT_SIGNALS = ['LONG_AUTH', 'SCENT', 'PACK', 'DEFECT', 'MARK', 'RETURN']
+PRODUCT_SIGNALS = CONTROL_SIGNALS
 MIN_CLASSIFICATION_CONFIDENCE = 0.7
 
 
@@ -37,6 +38,11 @@ def is_negative(analysis):
     return bool(analysis and (analysis.sentiment == 'negative' or analysis.hidden_negative))
 
 
+def serious_analysis(analysis):
+    return bool(trusted_analysis(analysis) and is_negative(analysis) and
+                (analysis.severity == 'P0' or analysis.objective_issue and analysis.severity == 'P1'))
+
+
 def product_family(product, scope=None):
     from desk.models import Product
     products = Product.objects.filter(code=product.code)
@@ -56,19 +62,19 @@ def evaluate(product, signal, window='100', now=None, scope=None, account_id=Non
         threads = Thread.objects.filter(product__in=family, kind='review', received_at__lte=period['until']).select_related('analysis', 'assessment')
         if account_id is not None: threads = threads.filter(account_id=account_id)
         threads = list(threads.filter(received_at__gte=period['start_at'])) if period['start_at'] else []
-    analyses = [(t, effective_analysis(t)) for t in threads]
+    analysis_for = dataset.analysis if dataset else effective_analysis
+    analyses = [(t, analysis_for(t)) for t in threads]
     classification_missing = any(not trusted_analysis(a) for _, a in analyses)
     selected = [t for t, a in analyses if trusted_analysis(a) and is_negative(a) and (signal == 'NEGATIVE' or matches(a.signals, signal))]
     count = len(selected)
     raw_rate = count / total * 100 if total else None
     rate = round(raw_rate, 2) if raw_rate is not None else None
-    baseline = None
-    if account_id is None or signal == 'NEGATIVE':
-        baseline = (dataset.baseline(product.code, signal, account_id) if dataset else
-                    Baseline.objects.filter(product__in=family, signal=signal).order_by('product_id').first())
-        if baseline is None and signal == 'NEGATIVE' and dataset is None:
-            from .defaults import default_for_family
-            baseline = default_for_family(family, account_id)
+    baseline = (dataset.baseline(product.code, signal, account_id) if dataset else
+                Baseline.objects.filter(product__in=family, signal=signal).order_by('product_id').first())
+    if baseline is None and dataset is None:
+        from .defaults import default_for_family
+        baseline = default_for_family(family, account_id, signal)
+    threshold_rule = bool(baseline and (signal == 'NEGATIVE' or baseline.rule_kind == 'thresholds'))
     status, reason = 'WATCH', 'Порог не настроен'
     cluster = False
     cluster_selected = []
@@ -80,20 +86,20 @@ def evaluate(product, signal, window='100', now=None, scope=None, account_id=Non
             recent_source = Thread.objects.filter(product__in=family, kind='review', received_at__gte=cluster_start, received_at__lte=now).select_related('analysis', 'assessment')
             if account_id is not None: recent_source = recent_source.filter(account_id=account_id)
         recent = [t for t in recent_source if cluster_start <= t.received_at <= now and (account_id is None or t.account_id == account_id)
-                  and trusted_analysis(a := effective_analysis(t)) and is_negative(a) and (signal == 'NEGATIVE' or matches(a.signals, signal))]
+                  and trusted_analysis(a := analysis_for(t)) and is_negative(a) and (signal == 'NEGATIVE' or matches(a.signals, signal))]
         if signal == 'NEGATIVE':
-            groups = [[t for t in recent if matches(effective_analysis(t).signals, theme)] for theme in PRODUCT_SIGNALS]
+            groups = [[t for t in recent if matches(analysis_for(t).signals, theme)] for theme in PRODUCT_SIGNALS if theme in SERIES_SIGNALS]
             cluster_selected = max(groups, key=len, default=[])
         else:
             cluster_selected = recent
-        cluster = len(cluster_selected) >= baseline.cluster_count
+        cluster = baseline.cluster_enabled and len(cluster_selected) >= baseline.cluster_count
         if total < baseline.min_redemptions:
             reason = 'Недостаточная выборка'
-        elif raw_rate is not None and (raw_rate >= baseline.high if signal == 'NEGATIVE' else raw_rate > baseline.high) and count >= baseline.min_signals:
-            status, reason = 'ANOMALY', 'Достигнут порог расследования' if signal == 'NEGATIVE' else 'Частота выше обычного уровня'
-        elif raw_rate is not None and (raw_rate >= baseline.high if signal == 'NEGATIVE' else raw_rate > baseline.high):
+        elif raw_rate is not None and (raw_rate >= baseline.high if threshold_rule else raw_rate > baseline.high) and count >= baseline.min_signals:
+            status, reason = 'ANOMALY', 'Достигнут порог расследования' if threshold_rule else 'Частота выше обычного уровня'
+        elif raw_rate is not None and (raw_rate >= baseline.high if threshold_rule else raw_rate > baseline.high):
             reason = 'Недостаточно сигналов для аномалии'
-        elif signal == 'NEGATIVE' and raw_rate is not None and raw_rate >= baseline.low and count >= baseline.min_signals:
+        elif threshold_rule and raw_rate is not None and raw_rate >= baseline.low and count >= baseline.min_signals:
             reason = 'Достигнут порог предупреждения'
         else:
             status, reason = 'NORMAL', 'В пределах настроенного порога'
@@ -102,11 +108,15 @@ def evaluate(product, signal, window='100', now=None, scope=None, account_id=Non
         rate, status, reason = None, 'WATCH', '; '.join(period['reasons'])
     if classification_missing:
         rate, status, reason = None, 'WATCH', 'Не все отзывы разобраны; предварительная разметка не подтверждает отсутствие жалоб'
+    if threshold_rule and total < baseline.min_redemptions:
+        rate = None
     if cluster:
         status, reason = 'ANOMALY', 'Кластер похожих подтверждённых сигналов'
     evidence = {t.pk: t for t in selected}
     if cluster: evidence.update({t.pk: t for t in cluster_selected})
     return {'signal': signal, 'label': signal_label(signal), 'count': count, 'redemptions': total, 'rate': rate, 'start': start, 'status': status, 'reason': reason, 'baseline': baseline, 'cluster': cluster, 'cluster_count': len(cluster_selected) if cluster else 0,
+            'warning': bool(status == 'WATCH' and reason == 'Достигнут порог предупреждения' and rate is not None),
+            'threshold_rule': threshold_rule, 'control_kind': 'process' if signal in PROCESS_SIGNALS else 'product',
             'period': period, 'selected': list(evidence.values()), 'account_id': account_id}
 
 
@@ -125,7 +135,7 @@ def review_summary(product, window='100', now=None, scope=None, account_id=None,
     total, classified, negative, preliminary = 0, 0, 0, 0
     for review in reviews:
         total += 1
-        analysis = effective_analysis(review)
+        analysis = dataset.analysis(review) if dataset else effective_analysis(review)
         if not trusted_analysis(analysis):
             preliminary += bool(analysis and analysis.provider in {'rules', 'demo'})
             continue

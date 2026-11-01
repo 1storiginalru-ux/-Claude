@@ -262,8 +262,10 @@ def product_detail(request, pk):
                    if (account_id is None or issue['account_id']==account_id) and overlaps(issue,summary['period']['start_at'],summary['period']['until'])]
     history = scoped_threads(request.user).filter(product__in=family)
     if account_id is not None: history = history.filter(account_id=account_id)
-    baseline = dataset.baselines.get((product.code, 'NEGATIVE'))
-    account_metrics = [{'name': account.name, **evaluate(product, 'NEGATIVE', window, dataset=dataset, account_id=account.pk)} for account in product_accounts]
+    baseline = dataset.baseline(product.code, 'NEGATIVE', account_id)
+    account_metrics = [{'name': account.name, **evaluate(product, signal, window, dataset=dataset, account_id=account.pk)}
+                       for account in product_accounts if account_id is None or account.pk == account_id
+                       for signal in ['NEGATIVE', *PRODUCT_SIGNALS]]
     initial = {'warning': baseline.low, 'threshold': baseline.high, 'min_redemptions': baseline.min_redemptions, 'min_signals': baseline.min_signals, 'cluster_count': baseline.cluster_count, 'cluster_days': baseline.cluster_days} if baseline else {}
     return render(request, 'desk/product.html', context(request, product=product, metrics=metrics, sales=sales, window=window, threads=history[:30], summary=summary, product_accounts=product_accounts, selected_account=str(account_id or ''), recent_sales=recent_sales,market_issues=market_issues[:20],
         can_manage_rules=can_manage_rules(request.user, product), negative_rule=baseline, rule_form=NegativeRuleForm(initial=initial), account_metrics=account_metrics))
@@ -291,7 +293,8 @@ def product_rules(request, pk):
     before = Baseline.objects.filter(product=canonical, signal='NEGATIVE').values().first()
     baseline, _ = Baseline.objects.update_or_create(product=canonical, signal='NEGATIVE', defaults={
         'low': data['warning'], 'high': data['threshold'], 'min_redemptions': data['min_redemptions'],
-        'min_signals': data['min_signals'], 'cluster_count': data['cluster_count'], 'cluster_days': data['cluster_days'], 'source': 'manual'})
+        'min_signals': data['min_signals'], 'cluster_count': data['cluster_count'], 'cluster_days': data['cluster_days'],
+        'source': 'manual', 'rule_kind': 'thresholds'})
     Audit.objects.create(company=canonical.company, actor=request.user, action='control.rule', object_id=str(baseline.pk), before=before or {}, after=data)
     messages.success(request, 'Правило сохранено. Фоновая проверка применит его без отправки ответов покупателям.')
     return redirect('product', pk=pk)

@@ -4,6 +4,7 @@ from django.urls import path
 from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 from desk import views
 from desk.replies import views as reply_views
+from desk import control_views
 
 # Administration includes credentials binding names, so staff alone is not sufficient.
 admin.site.has_permission = lambda request: request.user.is_active and request.user.is_superuser
@@ -22,6 +23,7 @@ urlpatterns = [
     path('products/<int:pk>/', views.product_detail, name='product'),
     path('products/<int:pk>/rules/', views.product_rules, name='product_rules'),
     path('voc/', views.voc, name='voc'),
+    path('voc/rules/', control_views.control_rules, name='control_rules'),
     path('imports/', views.imports, name='imports'),
     path('integrations/', views.integrations, name='integrations'),
     path('tone/', views.tone, name='tone'),

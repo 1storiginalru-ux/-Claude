@@ -5,7 +5,7 @@ from django.db import transaction
 from desk.models import Audit, Incident
 from desk.voc.rules import evaluate
 from desk.voc.rules import product_family, grouped_signals
-from desk.voc.rules import is_negative, trusted_analysis
+from desk.voc.rules import is_negative, trusted_analysis, serious_analysis
 from desk.reviews import effective_analysis
 
 
@@ -45,6 +45,7 @@ def escalate(thread, signal, actor=None, metric=None, *, trigger=None):
                 'severity': severity, 'objective_issue': bool(analysis and analysis.objective_issue),
                 'summary': getattr(analysis, 'summary', ''),
             },
+            'control_kind': metric.get('control_kind', 'product'),
         }
         incident.save(update_fields=['opening_snapshot'])
     incident.threads.add(thread)
@@ -66,16 +67,17 @@ def evaluate_incidents(thread, actor=None, *, historical=False):
     from django.utils import timezone
     recent = not historical or thread.received_at >= timezone.now() - timedelta(days=7)
     signals = grouped_signals(analysis.signals)
+    if not signals and serious_analysis(analysis): signals = ['OTHER']
     if is_negative(analysis): signals.append('NEGATIVE')
     for signal in signals:
         stats = evaluate(thread.product, signal)
-        if signal == 'NEGATIVE' and stats['status'] != 'ANOMALY':
+        if stats['status'] != 'ANOMALY':
             scoped = evaluate(thread.product, signal, account_id=thread.account_id)
             if scoped['status'] == 'ANOMALY': stats = scoped
         if stats['status'] == 'ANOMALY':
             attach_metric_incident(thread.product, stats, actor)
-        elif recent and signal != 'NEGATIVE' and trusted_analysis(analysis) and analysis.objective_issue and analysis.severity in {'P0', 'P1'}:
-            escalate(thread, signal, actor, stats, trigger='serious')
+        elif recent and signal != 'NEGATIVE' and serious_analysis(analysis):
+            attach_metric_incident(thread.product, {**stats, 'selected': [thread]}, actor, trigger='serious')
         elif is_negative(analysis) and trusted_analysis(analysis) and (not historical or any(t.pk == thread.pk for t in stats['selected'])):
             canonical = product_family(thread.product).order_by('pk').first()
             if Incident.objects.filter(product=canonical, signal=signal).exclude(status='CLOSED').exists():
@@ -83,7 +85,7 @@ def evaluate_incidents(thread, actor=None, *, historical=False):
 
 
 @transaction.atomic
-def attach_metric_incident(product, metric, actor=None):
+def attach_metric_incident(product, metric, actor=None, *, trigger=None):
     selected = metric['selected']
     if not selected:
         return
@@ -97,7 +99,8 @@ def attach_metric_incident(product, metric, actor=None):
         if all(t.pk in closed_ids for t in selected):
             return  # Closing a case is deliberate; old evidence must not reopen it every minute.
     for thread in selected:
-        escalate(thread, metric['signal'], actor, metric, trigger='cluster' if metric.get('cluster') else 'threshold')
+        escalate(thread, metric['signal'], actor, metric,
+                 trigger=trigger or ('cluster' if metric.get('cluster') else 'threshold'))
 
 
 def recheck_products():
@@ -114,16 +117,22 @@ def recheck_products():
     if not products: return
     dataset = ControlDataset(products, companies)
     for product in products:
+        for thread in dataset.threads[product.code]:
+            if thread.received_at < dataset.now - timedelta(days=7) or not serious_analysis(dataset.analysis(thread)):
+                continue
+            for signal in grouped_signals(dataset.analysis(thread).signals) or ['OTHER']:
+                if dataset.has_rule(product.code, signal):
+                    metric = evaluate(product, signal, dataset=dataset)
+                    attach_metric_incident(product, {**metric, 'selected': [thread]}, trigger='serious')
         from desk.voc.rules import PRODUCT_SIGNALS
         for signal in ['NEGATIVE', *PRODUCT_SIGNALS]:
             if not dataset.has_rule(product.code, signal): continue
             metric = evaluate(product, signal, dataset=dataset)
             if metric['status'] == 'ANOMALY':
                 attach_metric_incident(product, metric)
-            if signal == 'NEGATIVE':
-                for account_id in {m.account_id for m in dataset.mappings[product.code]}:
-                    scoped = evaluate(product, signal, dataset=dataset, account_id=account_id)
-                    if scoped['status'] == 'ANOMALY': attach_metric_incident(product, scoped)
+            for account_id in {m.account_id for m in dataset.mappings[product.code]}:
+                scoped = evaluate(product, signal, dataset=dataset, account_id=account_id)
+                if scoped['status'] == 'ANOMALY': attach_metric_incident(product, scoped)
 
 
 def sync_bitrix(incident):

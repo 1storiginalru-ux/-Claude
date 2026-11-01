@@ -1,6 +1,6 @@
 from datetime import timedelta
 from desk.reviews import effective_analysis
-from .rules import PRODUCT_SIGNALS, evaluate, review_summary, trusted_analysis
+from .rules import PRODUCT_SIGNALS, evaluate, review_summary, trusted_analysis, serious_analysis
 
 
 def product_queue(products, dataset, incidents):
@@ -13,14 +13,15 @@ def product_queue(products, dataset, incidents):
         overall = evaluate(product, 'NEGATIVE', dataset=dataset)
         themes = [evaluate(product, s, dataset=dataset) for s in PRODUCT_SIGNALS]
         accounts = {m.account_id: m.account.name for m in dataset.mappings[product.code]}
-        account_metrics = [{'name': name, **evaluate(product, 'NEGATIVE', dataset=dataset, account_id=pk)} for pk, name in accounts.items()]
+        account_metrics = [{'name': name, **evaluate(product, signal, dataset=dataset, account_id=pk)}
+                           for pk, name in accounts.items() for signal in ['NEGATIVE', *PRODUCT_SIGNALS]]
         open_cases = by_code.get(product.code, [])
-        pending = sum(not trusted_analysis(effective_analysis(t)) for t in dataset.threads[product.code]
+        pending = sum(not trusted_analysis(dataset.analysis(t)) for t in dataset.threads[product.code]
                       if t.received_at >= dataset.now - timedelta(days=7))
         anomalies = [m for m in [overall, *themes, *account_metrics] if m['status'] == 'ANOMALY']
-        serious = any(trusted_analysis(a := effective_analysis(t)) and a.objective_issue and a.severity in {'P0', 'P1'}
+        serious = any(serious_analysis(dataset.analysis(t))
                       for t in dataset.threads[product.code] if t.received_at >= dataset.now - timedelta(days=7))
-        warnings = [m for m in [overall, *account_metrics] if m['baseline'] and m['status'] == 'WATCH' and m['rate'] is not None and m['period']['complete']]
+        warnings = [m for m in [overall, *themes, *account_metrics] if m['warning'] and m['period']['complete']]
         warning = bool(warnings)
         if anomalies or serious:
             status, label, css, reason = 'attention', 'Требует проверки', 'anomaly', anomalies[0]['reason'] if anomalies else 'Серьёзная конкретная проблема'
@@ -35,6 +36,7 @@ def product_queue(products, dataset, incidents):
         else:
             status, label, css, reason = 'normal', 'Обычный уровень', 'normal', 'В пределах настроенного порога'
         rows.append({'product': product, 'summary': summary, 'overall': overall, 'themes': [m for m in themes if m['count'] or m['cluster_count']],
+                     'metrics': [overall, *themes, *account_metrics],
                      'cluster_count': max([m['cluster_count'] for m in [overall, *themes, *account_metrics]], default=0),
                      'incidents': open_cases, 'pending': pending, 'status': status, 'label': label, 'css': css, 'reason': reason,
                      'account_alerts': [m for m in account_metrics if m['status'] == 'ANOMALY' or m in warnings],

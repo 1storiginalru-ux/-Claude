@@ -354,13 +354,21 @@ class Baseline(models.Model):
     min_signals = models.PositiveIntegerField(default=3)
     cluster_count = models.PositiveIntegerField(default=4)
     cluster_days = models.PositiveIntegerField(default=3)
+    cluster_enabled = models.BooleanField('Проверять серии жалоб', default=True)
+    rule_kind = models.CharField('Вид правила', max_length=20, default='band',
+        choices=[('band', 'Исторический диапазон'), ('thresholds', 'Предупреждение и расследование')])
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['product', 'signal'], name='baseline_unique')]
 
     def clean(self):
+        import math
         from django.core.exceptions import ValidationError
+        if not math.isfinite(self.low) or not math.isfinite(self.high):
+            raise ValidationError('Пороги должны быть конечными числами.')
         if self.low > self.high: raise ValidationError('Нижняя граница больше верхней.')
+        if self.rule_kind == 'thresholds' and self.low >= self.high:
+            raise ValidationError('Предупреждение должно быть ниже расследования.')
         if min(self.min_redemptions, self.min_signals, self.cluster_count, self.cluster_days) < 1:
             raise ValidationError('Размеры выборки и кластера должны быть больше нуля.')
 
@@ -385,6 +393,34 @@ class ControlDefaults(models.Model):
             raise ValidationError('Общее правило доступно для реальных кабинетов WB и Маркета.')
 
     def __str__(self): return f'{self.account}: {self.warning} / {self.threshold}'
+
+
+class ControlTopicRule(models.Model):
+    """Cabinet-wide topic thresholds; no rows are enabled by a migration."""
+    from .voc.topics import TOPICS
+    account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name='control_topic_rules')
+    signal = models.CharField('Тема', max_length=40, choices=TOPICS)
+    warning = models.FloatField('Предупреждение', validators=[MinValueValidator(0)])
+    threshold = models.FloatField('Расследование', validators=[MinValueValidator(0)])
+    min_redemptions = models.PositiveIntegerField(default=100, validators=[MinValueValidator(100), MaxValueValidator(100)])
+    min_signals = models.PositiveIntegerField(default=1, validators=[MinValueValidator(1)])
+    cluster_enabled = models.BooleanField('Проверять серии жалоб', default=True)
+    cluster_count = models.PositiveIntegerField(default=4, validators=[MinValueValidator(2)])
+    cluster_days = models.PositiveIntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(90)])
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['account', 'signal'], name='control_topic_account_unique')]
+
+    def clean(self):
+        import math
+        from django.core.exceptions import ValidationError
+        if not math.isfinite(self.warning) or not math.isfinite(self.threshold) or self.warning >= self.threshold:
+            raise ValidationError('Предупреждение должно быть ниже расследования; пороги должны быть конечными.')
+        if self.account_id and (self.account.company.is_demo or self.account.platform not in {'wb', 'ym'}):
+            raise ValidationError('Порог доступен для реального кабинета WB или Маркета.')
+
+    def __str__(self): return f'{self.account}: {self.get_signal_display()}'
 
 
 class ReviewAssessment(models.Model):

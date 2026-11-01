@@ -2,7 +2,8 @@
 from collections import defaultdict
 from django.db.models import F
 from django.utils import timezone
-from desk.models import Baseline, ControlDefaults, ProductMapping, SaleEvent, SalesDaily, SalesSyncState, SyncState, Thread
+from desk.models import Baseline, ControlDefaults, ControlTopicRule, ProductMapping, SaleEvent, SalesDaily, SalesSyncState, SyncState, Thread
+from desk.reviews import effective_analysis
 from .windows import calculate_window
 
 
@@ -29,8 +30,9 @@ class ControlDataset:
             self.daily[row['product_code']].append(row)
         reviews = Thread.objects.filter(product__code__in=codes, account__company_id__in=self.company_ids, product__company_id__in=self.company_ids, kind='review', received_at__lte=self.now)
         if include_reviews:
-            for thread in reviews.select_related('analysis', 'assessment', 'product').defer('source_data', 'history_cursor', 'analysis__draft', 'analysis__summary', 'assessment__comment'):
+            for thread in reviews.select_related('analysis', 'assessment', 'product', 'account').defer('history_cursor', 'analysis__draft', 'analysis__summary', 'assessment__comment'):
                 self.threads[thread.product.code].append(thread)
+        self.analyses = {t.pk: effective_analysis(t) for threads in self.threads.values() for t in threads}
         self.sales_states = {s.account_id: s for s in SalesSyncState.objects.filter(account_id__in=accounts)}
         from .uncertainty import sale_issues
         self.uncertainties=defaultdict(list)
@@ -47,21 +49,29 @@ class ControlDataset:
         self.explicit_baselines = dict(self.baselines)
         self.default_rules = {row.account_id: row for row in ControlDefaults.objects.filter(
             account_id__in=accounts, account__company_id__in=self.company_ids)}
+        self.topic_rules = {(row.account_id, row.signal): row for row in ControlTopicRule.objects.filter(
+            account_id__in=accounts, account__company_id__in=self.company_ids)}
         for code in codes:
             rule = self.baseline(code, 'NEGATIVE')
             if rule: self.baselines.setdefault((code, 'NEGATIVE'), rule)
 
     def baseline(self, code, signal, account_id=None):
         explicit = self.explicit_baselines.get((code, signal))
-        if explicit or signal != 'NEGATIVE':
+        if explicit:
             return explicit
         from .defaults import fallback_rule
         accounts = {m.account_id for m in self.mappings[code] if account_id is None or m.account_id == account_id}
-        return fallback_rule(self.default_rules[pk] for pk in accounts if pk in self.default_rules)
+        if signal == 'NEGATIVE':
+            return fallback_rule(self.default_rules[pk] for pk in accounts if pk in self.default_rules)
+        return fallback_rule((self.topic_rules[pk, signal] for pk in accounts if (pk, signal) in self.topic_rules), signal)
 
     def has_rule(self, code, signal):
-        return ((code, signal) in self.baselines or signal == 'NEGATIVE'
-                and any(m.account_id in self.default_rules for m in self.mappings[code]))
+        return ((code, signal) in self.explicit_baselines or any(
+            m.account_id in self.default_rules if signal == 'NEGATIVE' else (m.account_id, signal) in self.topic_rules
+            for m in self.mappings[code]))
+
+    def analysis(self, thread):
+        return self.analyses.get(thread.pk)
 
     def period(self, code, window='100', account_id=None):
         key = (code, window, account_id)

@@ -1,0 +1,5 @@
+{% if m.baseline %}
+{% if m.threshold_rule %}Предупреждение от {{ m.baseline.low }}<br>Расследование от {{ m.baseline.high }}{% else %}Диапазон {{ m.baseline.low }}–{{ m.baseline.high }}{% endif %}
+<small>{{ m.baseline.get_source_display }}</small>
+{% if m.baseline.cluster_enabled %}<small>Серия: {{ m.baseline.cluster_count }} за {{ m.baseline.cluster_days }} дн.</small>{% endif %}
+{% else %}Не настроен{% endif %}
